@@ -12,6 +12,17 @@ endif()
 target_link_libraries(xenia-ui PUBLIC xenia-base)
 if(WIN32)
   target_link_libraries(xenia-ui PRIVATE dwmapi dxgi winmm)
+elseif(APPLE)
+  # SDL2 via Homebrew
+  target_include_directories(xenia-ui PRIVATE /opt/homebrew/include)
+  target_link_directories(xenia-ui PRIVATE /opt/homebrew/lib)
+  target_link_libraries(xenia-ui PRIVATE SDL2)
+  target_link_libraries(xenia-ui PRIVATE
+    "-framework Cocoa"
+    "-framework Metal"
+    "-framework QuartzCore"
+    "-framework IOKit"
+  )
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   target_link_libraries(xenia-ui PRIVATE xcb X11 X11-xcb fontconfig ${GTK3_LIBRARIES})
 endif()

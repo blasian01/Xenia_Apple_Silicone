@@ -77,12 +77,19 @@ add_library(discord-rpc STATIC
   discord-rpc/src/serialization.cpp
   discord-rpc/src/serialization.h
 )
-target_compile_definitions(discord-rpc PRIVATE RAPIDJSON_SSE42)
+if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
+  target_compile_definitions(discord-rpc PRIVATE RAPIDJSON_SSE42)
+endif()
 target_include_directories(discord-rpc PUBLIC discord-rpc/include PRIVATE rapidjson/include)
 if(WIN32)
   target_sources(discord-rpc PRIVATE
     discord-rpc/src/connection_win.cpp
     discord-rpc/src/discord_register_win.cpp
+  )
+elseif(APPLE)
+  target_sources(discord-rpc PRIVATE
+    discord-rpc/src/connection_unix.cpp
+    discord-rpc/src/discord_register_linux.cpp
   )
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   target_sources(discord-rpc PRIVATE
@@ -240,20 +247,33 @@ if(_zlibng_needs_configure)
   )
 endif()
 file(GLOB _zlibng_c "zlib-ng/*.c")
-file(GLOB _zlibng_x86 "zlib-ng/arch/x86/*.c")
 file(GLOB _zlibng_generic "zlib-ng/arch/generic/*.c")
-add_library(zlib-ng STATIC
-  ${_zlibng_c}
-  ${_zlibng_x86}
-  ${_zlibng_generic}
-)
-target_compile_definitions(zlib-ng PRIVATE
-  X86_FEATURES
-  X86_HAVE_XSAVE_INTRIN
-  X86_SSSE3
-  X86_SSE42
-  WITH_GZFILEOP
-)
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
+  file(GLOB _zlibng_arm "zlib-ng/arch/arm/*.c")
+  add_library(zlib-ng STATIC
+    ${_zlibng_c}
+    ${_zlibng_arm}
+    ${_zlibng_generic}
+  )
+  target_compile_definitions(zlib-ng PRIVATE
+    ARM_FEATURES
+    WITH_GZFILEOP
+  )
+else()
+  file(GLOB _zlibng_x86 "zlib-ng/arch/x86/*.c")
+  add_library(zlib-ng STATIC
+    ${_zlibng_c}
+    ${_zlibng_x86}
+    ${_zlibng_generic}
+  )
+  target_compile_definitions(zlib-ng PRIVATE
+    X86_FEATURES
+    X86_HAVE_XSAVE_INTRIN
+    X86_SSSE3
+    X86_SSE42
+    WITH_GZFILEOP
+  )
+endif()
 if(WIN32)
   target_compile_definitions(zlib-ng PRIVATE
     X86_SSE2
@@ -264,20 +284,22 @@ if(WIN32)
     X86_VPCLMULQDQ_CRC
   )
 else()
-  # Remove AVX2/AVX512 files on non-Windows
-  set(_zlibng_exclude_patterns
-    "adler32_avx2" "adler32_avx512" "adler32_avx512_vnni"
-    "chunkset_avx2" "compare256_avx2"
-    "crc32_pclmulqdq" "crc32_vpclmulqdq"
-    "slide_hash_avx2"
-  )
-  foreach(_pat ${_zlibng_exclude_patterns})
-    list(FILTER _zlibng_x86 EXCLUDE REGEX "${_pat}")
-  endforeach()
-  # Re-set sources without excluded files
-  get_target_property(_zlibng_srcs zlib-ng SOURCES)
-  set_target_properties(zlib-ng PROPERTIES SOURCES "")
-  target_sources(zlib-ng PRIVATE ${_zlibng_c} ${_zlibng_x86} ${_zlibng_generic})
+  if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
+    # Remove AVX2/AVX512 files on non-Windows x86
+    set(_zlibng_exclude_patterns
+      "adler32_avx2" "adler32_avx512" "adler32_avx512_vnni"
+      "chunkset_avx2" "compare256_avx2"
+      "crc32_pclmulqdq" "crc32_vpclmulqdq"
+      "slide_hash_avx2"
+    )
+    foreach(_pat ${_zlibng_exclude_patterns})
+      list(FILTER _zlibng_x86 EXCLUDE REGEX "${_pat}")
+    endforeach()
+    # Re-set sources without excluded files
+    get_target_property(_zlibng_srcs zlib-ng SOURCES)
+    set_target_properties(zlib-ng PROPERTIES SOURCES "")
+    target_sources(zlib-ng PRIVATE ${_zlibng_c} ${_zlibng_x86} ${_zlibng_generic})
+  endif()
 endif()
 target_include_directories(zlib-ng PUBLIC zlib-ng)
 
@@ -304,6 +326,21 @@ if(WIN32)
     libusb/libusb/os/windows_winusb.h
   )
   target_include_directories(libusb PUBLIC libusb/libusb PRIVATE libusb/msvc)
+elseif(APPLE)
+  # Use system libusb on macOS (brew install libusb)
+  add_library(libusb INTERFACE)
+  find_package(PkgConfig QUIET)
+  if(PkgConfig_FOUND)
+    pkg_check_modules(LIBUSB_PKG QUIET libusb-1.0)
+  endif()
+  if(LIBUSB_PKG_FOUND)
+    target_include_directories(libusb INTERFACE ${LIBUSB_PKG_INCLUDE_DIRS})
+    target_link_libraries(libusb INTERFACE ${LIBUSB_PKG_LDFLAGS})
+  else()
+    # Fallback: try Homebrew default paths
+    target_include_directories(libusb INTERFACE /usr/local/include/libusb-1.0 /opt/homebrew/include/libusb-1.0)
+    target_link_libraries(libusb INTERFACE -lusb-1.0)
+  endif()
 endif()
 
 # ==============================================================================
@@ -373,13 +410,28 @@ if(WIN32)
   target_include_directories(SDL2 PUBLIC SDL2/include)
   target_link_libraries(SDL2 PRIVATE setupapi winmm imm32 version)
 else()
-  # Use system SDL2 on Linux
+  # Use system SDL2 on Linux and macOS
   add_library(SDL2 INTERFACE)
-  find_package(PkgConfig REQUIRED)
-  pkg_check_modules(SDL2_PKG REQUIRED sdl2)
-  target_include_directories(SDL2 INTERFACE ${SDL2_PKG_INCLUDE_DIRS})
-  target_link_libraries(SDL2 INTERFACE ${SDL2_PKG_LDFLAGS})
-  target_compile_options(SDL2 INTERFACE ${SDL2_PKG_CFLAGS_OTHER})
+  if(APPLE)
+    # On macOS, try find_package first (Homebrew), then fall back to pkg-config
+    find_package(SDL2 QUIET)
+    if(SDL2_FOUND)
+      target_include_directories(SDL2 INTERFACE ${SDL2_INCLUDE_DIRS})
+      target_link_libraries(SDL2 INTERFACE ${SDL2_LIBRARIES})
+    else()
+      find_package(PkgConfig REQUIRED)
+      pkg_check_modules(SDL2_PKG REQUIRED sdl2)
+      target_include_directories(SDL2 INTERFACE ${SDL2_PKG_INCLUDE_DIRS})
+      target_link_libraries(SDL2 INTERFACE ${SDL2_PKG_LDFLAGS})
+      target_compile_options(SDL2 INTERFACE ${SDL2_PKG_CFLAGS_OTHER})
+    endif()
+  else()
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(SDL2_PKG REQUIRED sdl2)
+    target_include_directories(SDL2 INTERFACE ${SDL2_PKG_INCLUDE_DIRS})
+    target_link_libraries(SDL2 INTERFACE ${SDL2_PKG_LDFLAGS})
+    target_compile_options(SDL2 INTERFACE ${SDL2_PKG_CFLAGS_OTHER})
+  endif()
 endif()
 
 # ==============================================================================
@@ -520,6 +572,11 @@ if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
     FFmpeg/libavutil/x86/lls_init.c
     FFmpeg/libavutil/x86/tx_float_init.c
   )
+else()
+  # aarch64 stubs — provide missing init functions without NEON assembly
+  target_sources(libavutil PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/ffmpeg-xenia/libavutil/aarch64_stubs.c
+  )
 endif()
 ffmpeg_common(libavutil)
 
@@ -605,6 +662,11 @@ if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
     FFmpeg/libavcodec/x86/idctdsp_init.c
     FFmpeg/libavcodec/x86/mpegaudiodsp.c
     FFmpeg/libavcodec/x86/fdct.c
+  )
+else()
+  # aarch64 stubs
+  target_sources(libavcodec PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/ffmpeg-xenia/libavcodec/aarch64_stubs.c
   )
 endif()
 target_include_directories(libavcodec PRIVATE

@@ -556,17 +556,23 @@ void XThread::Execute() {
   // On Windows, setjmp/longjmp is used because MSVC's longjmp performs SEH
   // stack unwinding which already calls destructors.
   uint32_t next_address;
-#if XE_PLATFORM_LINUX
+#if XE_PLATFORM_LINUX || XE_PLATFORM_MAC
   try {
     exit_code = static_cast<int>(kernel_state()->processor()->Execute(
         thread_state_, address, args.data(), args.size()));
     next_address = 0;
   } catch (const FiberReentryException& e) {
-    // Ensure SIGRTMIN (used for thread suspend) is not left blocked.
+#if XE_PLATFORM_MAC
+    sigset_t set;
+    sigemptyset(&set);
+    sigaddset(&set, SIGUSR1);
+    pthread_sigmask(SIG_UNBLOCK, &set, nullptr);
+#else
     sigset_t set;
     sigemptyset(&set);
     sigaddset(&set, SIGRTMIN);
     pthread_sigmask(SIG_UNBLOCK, &set, nullptr);
+#endif
     next_address = e.address;
   }
 
@@ -578,10 +584,17 @@ void XThread::Execute() {
         exit_code = static_cast<int>(thread_state_->context()->r[3]);
       }
     } catch (const FiberReentryException& e) {
+#if XE_PLATFORM_MAC
+      sigset_t set;
+      sigemptyset(&set);
+      sigaddset(&set, SIGUSR1);
+      pthread_sigmask(SIG_UNBLOCK, &set, nullptr);
+#else
       sigset_t set;
       sigemptyset(&set);
       sigaddset(&set, SIGRTMIN);
       pthread_sigmask(SIG_UNBLOCK, &set, nullptr);
+#endif
       next_address = e.address;
     }
   }
@@ -616,7 +629,7 @@ void XThread::Reenter(uint32_t address) {
   // Called when the game switches fiber stacks (e.g., via
   // KeSetCurrentStackPointers in games like Forza Horizon 2).
   // Must unwind through all frames between here and Execute().
-#if XE_PLATFORM_LINUX
+#if XE_PLATFORM_LINUX || XE_PLATFORM_MAC
   // Throw a C++ exception that unwinds through JIT frames (using DWARF
   // .eh_frame info) and host frames (using compiler-generated DWARF),
   // calling destructors properly along the way.
@@ -767,7 +780,7 @@ X_STATUS XThread::Resume(uint32_t* out_suspend_count) {
   } else {
     return X_STATUS_UNSUCCESSFUL;
   }
-#elif XE_PLATFORM_LINUX
+#elif XE_PLATFORM_LINUX || XE_PLATFORM_MAC
   // Use mutex to protect suspend_count access and coordinate with SelfSuspend.
   bool should_resume_host = false;
   {
@@ -821,7 +834,7 @@ X_STATUS XThread::Suspend(uint32_t* out_suspend_count) {
   }
 }
 
-#if XE_PLATFORM_LINUX
+#if XE_PLATFORM_LINUX || XE_PLATFORM_MAC
 uint32_t XThread::SelfSuspend() {
   auto guest_thread = guest_object<X_KTHREAD>();
   std::unique_lock<std::mutex> lock(suspend_mutex_);

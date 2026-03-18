@@ -969,6 +969,7 @@ void DebugWindow::DrawRegistersPane() {
       ImGui::EndChild();
     } break;
     case RegisterGroup::kHostGeneral: {
+#if XE_ARCH_AMD64
       ImGui::BeginChild("##host_general");
       for (int i = 0; i < 18; ++i) {
         auto reg = static_cast<X64Register>(i);
@@ -991,8 +992,14 @@ void DebugWindow::DrawRegistersPane() {
         ImGui::EndGroup();
       }
       ImGui::EndChild();
+#else
+      ImGui::BeginChild("##host_general");
+      ImGui::Text("Host register view not available on this architecture.");
+      ImGui::EndChild();
+#endif
     } break;
     case RegisterGroup::kHostVector: {
+#if XE_ARCH_AMD64
       ImGui::BeginChild("##host_vector");
       for (int i = 0; i < 16; ++i) {
         auto reg =
@@ -1008,6 +1015,11 @@ void DebugWindow::DrawRegistersPane() {
         ImGui::EndGroup();
       }
       ImGui::EndChild();
+#else
+      ImGui::BeginChild("##host_vector");
+      ImGui::Text("Host vector register view not available on this architecture.");
+      ImGui::EndChild();
+#endif
     }
   }
 

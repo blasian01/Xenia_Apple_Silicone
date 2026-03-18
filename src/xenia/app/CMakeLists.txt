@@ -29,6 +29,10 @@ if(WIN32)
     ${PROJECT_SOURCE_DIR}/src/xenia/base/main_init_win.cc
     PROPERTIES COMPILE_OPTIONS "/arch:SSE2"
   )
+elseif(APPLE)
+  target_sources(xenia-app PRIVATE
+    ${PROJECT_SOURCE_DIR}/src/xenia/ui/windowed_app_main_mac.cc
+  )
 else()
   target_sources(xenia-app PRIVATE
     ${PROJECT_SOURCE_DIR}/src/xenia/base/main_init_posix.cc
@@ -102,6 +106,16 @@ if(WIN32)
     xenia-hid-xinput
     xenia-ui-d3d12
   )
+elseif(APPLE)
+  target_link_libraries(xenia-app PRIVATE
+    SDL2
+    "-framework Cocoa"
+    "-framework Metal"
+    "-framework QuartzCore"
+    "-framework IOKit"
+  )
+  target_include_directories(xenia-app PRIVATE /opt/homebrew/include)
+  target_link_directories(xenia-app PRIVATE /opt/homebrew/lib)
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   target_link_libraries(xenia-app PRIVATE
     xenia-apu-alsa

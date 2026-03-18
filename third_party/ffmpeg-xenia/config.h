@@ -33,8 +33,12 @@
 #define ARCH_X86_64 0
 
 #if defined(__aarch64__)
-  /* ARM64 (Android) */
-  #define SLIBSUF ".so"
+  /* ARM64 (Android, macOS Apple Silicon) */
+  #if defined(__APPLE__)
+    #define SLIBSUF ".dylib"
+  #else
+    #define SLIBSUF ".so"
+  #endif
   #undef  ARCH_AARCH64
   #define ARCH_AARCH64 1
   #define HAVE_ARMV8 1
@@ -51,10 +55,14 @@
   #define HAVE_FAST_64BIT 1
   #define HAVE_FAST_CLZ 1
   #define HAVE_SIMD_ALIGN_16 1
+  #define HAVE_SIMD_ALIGN_32 0
+  #define HAVE_SIMD_ALIGN_64 0
 #elif defined(__x86_64__) || defined(_M_X64)
-  /* x86_64 (Windows, Linux, Android x86_64) */
+  /* x86_64 (Windows, Linux, macOS, Android x86_64) */
   #if defined(_WIN32)
     #define SLIBSUF ".dll"
+  #elif defined(__APPLE__)
+    #define SLIBSUF ".dylib"
   #else
     #define SLIBSUF ".so"
   #endif
@@ -251,15 +259,13 @@
   #define HAVE_SLEEP 1
   #define HAVE_VIRTUALALLOC 1
 #else
-  /* POSIX (Linux, Android) */
+  /* POSIX (Linux, Android, macOS) */
   #define HAVE_DOS_PATHS 0
   #define HAVE_PTHREADS 1
   #define HAVE_INLINE_ASM 1
   #define HAVE_UNISTD_H 1
   #define HAVE_ARPA_INET_H 1
-  #define HAVE_ASM_TYPES_H 1
   #define HAVE_DIRENT_H 1
-  #define HAVE_LINUX_PERF_EVENT_H 1
   #define HAVE_POLL_H 1
   #define HAVE_SYS_PARAM_H 1
   #define HAVE_SYS_RESOURCE_H 1
@@ -267,9 +273,7 @@
   #define HAVE_SYS_TIME_H 1
   #define HAVE_SYS_UN_H 1
   #define HAVE_TERMIOS_H 1
-  #define HAVE_SEM_TIMEDWAIT 1
   #define HAVE_SYNC_VAL_COMPARE_AND_SWAP 1
-  #define HAVE_SECTION_DATA_REL_RO 1
   #define HAVE_CLOCK_GETTIME 1
   #define HAVE_FCNTL 1
   #define HAVE_GETADDRINFO 1
@@ -280,21 +284,17 @@
   #define HAVE_INET_ATON 1
   #define HAVE_LOCALTIME_R 1
   #define HAVE_LSTAT 1
-  #define HAVE_MEMALIGN 1
   #define HAVE_MKSTEMP 1
   #define HAVE_MMAP 1
   #define HAVE_MPROTECT 1
   #define HAVE_NANOSLEEP 1
   #define HAVE_POSIX_MEMALIGN 1
-  #define HAVE_SCHED_GETAFFINITY 1
   #define HAVE_SETRLIMIT 1
   #define HAVE_STRERROR_R 1
   #define HAVE_SYSCONF 1
   #define HAVE_USLEEP 1
   #define HAVE_INLINE_ASM_LABELS 1
   #define HAVE_INLINE_ASM_NONLOCAL_LABELS 1
-  #define HAVE_SYMVER_ASM_LABEL 1
-  #define HAVE_SYMVER_GNU_ASM 1
   #define HAVE_SOCKLEN_T 1
   #define HAVE_STRUCT_ADDRINFO 1
   #define HAVE_STRUCT_GROUP_SOURCE_REQ 1
@@ -305,15 +305,36 @@
   #define HAVE_STRUCT_RUSAGE_RU_MAXRSS 1
   #define HAVE_STRUCT_SOCKADDR_IN6 1
   #define HAVE_STRUCT_SOCKADDR_STORAGE 1
-  #define HAVE_STRUCT_STAT_ST_MTIM_TV_NSEC 1
   #define CONFIG_PIC 1
-  #if defined(__ANDROID__)
+  #if defined(__APPLE__)
+    /* macOS */
+    #define HAVE_ARC4RANDOM 1
+    #define HAVE_PTHREAD_CANCEL 1
+    #define HAVE_GLOB 1
+  #elif defined(__ANDROID__)
     #define HAVE_ARC4RANDOM 1
     #define HAVE_RSYNC_CONTIMEOUT 1
+    /* Linux-only headers */
+    #define HAVE_ASM_TYPES_H 1
+    #define HAVE_LINUX_PERF_EVENT_H 1
+    #define HAVE_SEM_TIMEDWAIT 1
+    #define HAVE_MEMALIGN 1
+    #define HAVE_SECTION_DATA_REL_RO 1
+    #define HAVE_STRUCT_STAT_ST_MTIM_TV_NSEC 1
+    #define HAVE_SCHED_GETAFFINITY 1
   #else
     /* Linux desktop */
+    #define HAVE_ASM_TYPES_H 1
+    #define HAVE_LINUX_PERF_EVENT_H 1
+    #define HAVE_SEM_TIMEDWAIT 1
+    #define HAVE_MEMALIGN 1
+    #define HAVE_SECTION_DATA_REL_RO 1
+    #define HAVE_STRUCT_STAT_ST_MTIM_TV_NSEC 1
+    #define HAVE_SCHED_GETAFFINITY 1
     #define HAVE_PTHREAD_CANCEL 1
     #define HAVE_SYMVER 1
+    #define HAVE_SYMVER_ASM_LABEL 1
+    #define HAVE_SYMVER_GNU_ASM 1
     #define HAVE_SYS_SOUNDCARD_H 1
     #define HAVE_GLOB 1
     #define CONFIG_ICONV 1
@@ -328,7 +349,9 @@
 #define HAVE_THREADS 1
 #define HAVE_ACCESS 1
 #define HAVE_ISATTY 1
+#if !defined(__APPLE__)
 #define HAVE_MALLOC_H 1
+#endif
 #define HAVE_PRAGMA_DEPRECATED 1
 
 /* Math functions */

@@ -32,6 +32,33 @@
 #include <unistd.h>
 #endif
 
+// Save native POSIX socket constants before undefining macros
+// (XSocket enum values share the same names as POSIX macros)
+#if !defined(XE_PLATFORM_WIN32)
+static constexpr int kNativeAF_INET = 2;
+static constexpr int kNativeSOCK_STREAM = 1;
+static constexpr int kNativeSOCK_DGRAM = 2;
+static constexpr int kNativeIPPROTO_TCP = 6;
+static constexpr int kNativeIPPROTO_UDP = 17;
+#endif
+
+// Undef POSIX socket macros that collide with XSocket enum values
+#ifdef AF_INET
+#undef AF_INET
+#endif
+#ifdef SOCK_STREAM
+#undef SOCK_STREAM
+#endif
+#ifdef SOCK_DGRAM
+#undef SOCK_DGRAM
+#endif
+#ifdef IPPROTO_TCP
+#undef IPPROTO_TCP
+#endif
+#ifdef IPPROTO_UDP
+#undef IPPROTO_UDP
+#endif
+
 namespace xe {
 namespace kernel {
 
@@ -51,7 +78,7 @@ const std::map<uint32_t, uint32_t> supported_tcp_options = {
 
 // Translate socket levels to native
 const std::map<uint32_t, uint32_t> supported_levels = {{0xFFFF, SOL_SOCKET},
-                                                       {0x6, IPPROTO_TCP}};
+                                                       {0x6, kNativeIPPROTO_TCP}};
 
 // Translate ioctl commands to native
 const std::map<uint32_t, uint32_t> supported_controls = {
@@ -75,7 +102,7 @@ X_STATUS XSocket::Initialize(AddressFamily af, Type type, Protocol proto) {
     proto = Protocol::IPPROTO_UDP;
   }
 
-  native_handle_ = socket(af, type, proto);
+  native_handle_ = socket(static_cast<int>(af), static_cast<int>(type), static_cast<int>(proto));
   if (native_handle_ == -1) {
     return X_STATUS_UNSUCCESSFUL;
   }
@@ -86,7 +113,7 @@ X_STATUS XSocket::Initialize(AddressFamily af, Type type, Protocol proto) {
 X_STATUS XSocket::Close() {
 #if XE_PLATFORM_WIN32
   int ret = closesocket(native_handle_);
-#elif XE_PLATFORM_LINUX
+#elif XE_PLATFORM_LINUX || XE_PLATFORM_MAC
   int ret = close(native_handle_);
 #endif
 
@@ -166,7 +193,7 @@ X_STATUS XSocket::IOControl(uint32_t cmd, uint8_t* arg_ptr) {
     return X_STATUS_UNSUCCESSFUL;
   }
   return X_STATUS_SUCCESS;
-#elif XE_PLATFORM_LINUX
+#elif XE_PLATFORM_LINUX || XE_PLATFORM_MAC
   int native_cmd = cmd;
 
   assert_false(!supported_controls.contains(cmd));

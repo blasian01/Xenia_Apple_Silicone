@@ -5,7 +5,7 @@ include(CMakeParseArguments)
 
 # Platform suffix lists for file filtering
 set(XE_PLATFORM_SUFFIXES
-  _win _linux _posix _gnulinux _x11 _gtk _android _mac
+  _win _linux _posix _gnulinux _x11 _gtk _android _mac _amd64 _x64
 )
 
 # xe_platform_sources(target base_path [RECURSIVE])
@@ -62,6 +62,17 @@ function(xe_platform_sources target base_path)
   if(WIN32)
     file(${glob_mode} _plat_sources      "${base_path}/*_win.h"
       "${base_path}/*_win.cc"
+      "${base_path}/*_amd64.h"
+      "${base_path}/*_amd64.cc"
+      "${base_path}/*_x64.h"
+      "${base_path}/*_x64.cc"
+    )
+  elseif(APPLE)
+    file(${glob_mode} _plat_sources      "${base_path}/*_posix.h"
+      "${base_path}/*_posix.cc"
+      "${base_path}/*_mac.h"
+      "${base_path}/*_mac.cc"
+      "${base_path}/*_mac.mm"
     )
   elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     file(${glob_mode} _plat_sources      "${base_path}/*_posix.h"
@@ -74,6 +85,10 @@ function(xe_platform_sources target base_path)
       "${base_path}/*_x11.cc"
       "${base_path}/*_gtk.h"
       "${base_path}/*_gtk.cc"
+      "${base_path}/*_amd64.h"
+      "${base_path}/*_amd64.cc"
+      "${base_path}/*_x64.h"
+      "${base_path}/*_x64.cc"
     )
   endif()
 
@@ -115,9 +130,16 @@ function(xe_target_defaults target)
         source_group(TREE ${PROJECT_SOURCE_DIR} PREFIX "External" FILES ${_external_srcs})
       endif()
     endif()
-  elseif(NOT CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+  elseif(NOT CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
     # GCC is too noisy for -Werror; only apply to Clang
     target_compile_options(${target} PRIVATE -Werror)
+  elseif(CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
+    # AppleClang: use -Werror but suppress some additional warnings
+    target_compile_options(${target} PRIVATE -Werror
+      -Wno-unused-private-field
+      -Wno-unused-lambda-capture
+      -Wno-deprecated-declarations
+    )
   endif()
 endfunction()
 

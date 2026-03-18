@@ -280,6 +280,12 @@ inline uint8_t tzcnt(int8_t v) { return tzcnt(static_cast<uint8_t>(v)); }
 inline uint8_t tzcnt(int16_t v) { return tzcnt(static_cast<uint16_t>(v)); }
 inline uint8_t tzcnt(int32_t v) { return tzcnt(static_cast<uint32_t>(v)); }
 inline uint8_t tzcnt(int64_t v) { return tzcnt(static_cast<uint64_t>(v)); }
+// On LP64 platforms (macOS), unsigned long is distinct from uint64_t but
+// same size. Add overloads to prevent ambiguity.
+#if !XE_PLATFORM_WIN32 && __SIZEOF_LONG__ == 8
+inline uint8_t lzcnt(unsigned long v) { return lzcnt(static_cast<uint64_t>(v)); }
+inline uint8_t tzcnt(unsigned long v) { return tzcnt(static_cast<uint64_t>(v)); }
+#endif
 
 // BitScanForward (bsf).
 // Search the value from least significant bit (LSB) to the most significant bit

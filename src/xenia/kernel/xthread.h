@@ -14,7 +14,7 @@
 #include <string>
 
 #include "xenia/base/mutex.h"
-#if XE_PLATFORM_LINUX
+#if XE_PLATFORM_LINUX || XE_PLATFORM_MAC
 #include <condition_variable>
 #include <csignal>
 #include <mutex>
@@ -222,6 +222,10 @@ struct X_KPCR {
   uint8_t unk_2AC[0x2C];            // 0x2AC
 };
 
+// macOS defines WAIT_ANY in sys/wait.h — undefine to avoid collision
+#ifdef WAIT_ANY
+#undef WAIT_ANY
+#endif
 enum : uint16_t {
   WAIT_ALL = 0,
   WAIT_ANY = 1,
@@ -343,7 +347,7 @@ struct X_KTHREAD {
 };
 static_assert_size(X_KTHREAD, 0xAB0);
 
-#if XE_PLATFORM_LINUX
+#if XE_PLATFORM_LINUX || XE_PLATFORM_MAC
 // Exception thrown by XThread::Reenter() to unwind through JIT frames.
 // C++ exception unwinding uses DWARF .eh_frame info registered for JIT code,
 // ensuring destructors and RAII guards in host C++ frames are properly called.
@@ -442,7 +446,7 @@ class XThread : public XObject, public cpu::Thread {
   X_STATUS Delay(uint32_t processor_mode, uint32_t alertable,
                  uint64_t interval);
 
-#if XE_PLATFORM_LINUX
+#if XE_PLATFORM_LINUX || XE_PLATFORM_MAC
   // Performs self-suspension: increments suspend_count and blocks until
   // another thread calls Resume() and suspend_count reaches 0.
   // Returns the previous suspend_count value.
@@ -490,7 +494,7 @@ class XThread : public XObject, public cpu::Thread {
 
   int32_t priority_ = 0;
 
-#if XE_PLATFORM_LINUX
+#if XE_PLATFORM_LINUX || XE_PLATFORM_MAC
   // Condition variable for thread self-suspension.
   std::mutex suspend_mutex_;
   std::condition_variable suspend_cv_;

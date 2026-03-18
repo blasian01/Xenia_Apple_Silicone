@@ -1,5 +1,11 @@
 cmake_minimum_required(VERSION 3.20)
 project(xenia LANGUAGES C CXX)
+if(APPLE)
+  enable_language(OBJC)
+  enable_language(OBJCXX)
+  # Add Homebrew library path for all targets (SDL2, etc.)
+  link_directories(/opt/homebrew/lib)
+endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -31,6 +37,8 @@ set(CMAKE_STATIC_LINKER_FLAGS_CHECKED "${CMAKE_STATIC_LINKER_FLAGS_DEBUG}" CACHE
 # Platform name for output paths
 if(WIN32)
   set(XE_PLATFORM_NAME "Windows")
+elseif(APPLE)
+  set(XE_PLATFORM_NAME "macOS")
 else()
   set(XE_PLATFORM_NAME "Linux")
 endif()
@@ -135,8 +143,15 @@ if(MSVC)
   set(CMAKE_STATIC_LINKER_FLAGS_RELEASE "${CMAKE_STATIC_LINKER_FLAGS_RELEASE} /LTCG")
 
 else()
-  # GCC/Clang (Linux)
-  add_compile_options(-mavx)
+  # GCC/Clang (Linux / macOS)
+  if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
+    add_compile_options(-mavx)
+  endif()
+
+  # macOS: disable fixup chains to handle large tables with unaligned pointers
+  if(APPLE)
+    add_link_options(-Wl,-no_fixup_chains)
+  endif()
 
   # Disable specific warnings for C++
   add_compile_options(
@@ -145,7 +160,7 @@ else()
   )
 
   # Clang-specific C++ warnings
-  if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+  if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang" OR CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
     add_compile_options(
       $<$<COMPILE_LANGUAGE:CXX>:-Wno-deprecated-register>
       $<$<COMPILE_LANGUAGE:CXX>:-Wno-deprecated-volatile>
@@ -153,16 +168,18 @@ else()
     )
 
     # Check Clang version for newer warnings
-    if(CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 20)
-      add_compile_options(
-        $<$<COMPILE_LANGUAGE:CXX>:-Wno-deprecated-literal-operator>
-        $<$<COMPILE_LANGUAGE:CXX>:-Wno-nontrivial-memcall>
-      )
-    endif()
-    if(CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 21)
-      add_compile_options(
-        $<$<COMPILE_LANGUAGE:CXX>:-Wno-character-conversion>
-      )
+    if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
+      if(CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 20)
+        add_compile_options(
+          $<$<COMPILE_LANGUAGE:CXX>:-Wno-deprecated-literal-operator>
+          $<$<COMPILE_LANGUAGE:CXX>:-Wno-nontrivial-memcall>
+        )
+      endif()
+      if(CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 21)
+        add_compile_options(
+          $<$<COMPILE_LANGUAGE:CXX>:-Wno-character-conversion>
+        )
+      endif()
     endif()
   elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     # GCC-specific
@@ -183,36 +200,72 @@ else()
     $<$<COMPILE_LANGUAGE:C>:-Wno-implicit-function-declaration>
   )
 
-  # GTK3 via pkg-config
-  find_package(PkgConfig REQUIRED)
-  pkg_check_modules(GTK3 REQUIRED gtk+-x11-3.0)
-  include_directories(${GTK3_INCLUDE_DIRS})
-  link_directories(${GTK3_LIBRARY_DIRS})
-  add_compile_options(${GTK3_CFLAGS_OTHER})
+  if(APPLE)
+    # ================================================================
+    # macOS-specific settings
+    # ================================================================
+    # Frameworks needed by the application
+    find_library(COCOA_FRAMEWORK Cocoa REQUIRED)
+    find_library(IOKIT_FRAMEWORK IOKit REQUIRED)
+    find_library(COREVIDEO_FRAMEWORK CoreVideo REQUIRED)
+    find_library(QUARTZCORE_FRAMEWORK QuartzCore REQUIRED)
+    find_library(METAL_FRAMEWORK Metal REQUIRED)
+    find_library(APPKIT_FRAMEWORK AppKit REQUIRED)
 
-  # Global Linux libraries
-  link_libraries(stdc++fs dl lz4 pthread rt)
+    # Global macOS libraries
+    link_libraries(
+      ${COCOA_FRAMEWORK}
+      ${IOKIT_FRAMEWORK}
+      ${COREVIDEO_FRAMEWORK}
+      ${QUARTZCORE_FRAMEWORK}
+      ${METAL_FRAMEWORK}
+      ${APPKIT_FRAMEWORK}
+      dl
+      pthread
+    )
 
-  # Link groups for executables (resolves circular deps)
-  set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--start-group")
-  set(CMAKE_CXX_STANDARD_LIBRARIES "${CMAKE_CXX_STANDARD_LIBRARIES} -Wl,--end-group")
+    # macOS does not have --start-group / --end-group; use -force_load or
+    # restructured link order instead. The Apple linker handles circular
+    # deps differently.
+  else()
+    # ================================================================
+    # Linux-specific settings
+    # ================================================================
+    # GTK3 via pkg-config
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(GTK3 REQUIRED gtk+-x11-3.0)
+    include_directories(${GTK3_INCLUDE_DIRS})
+    link_directories(${GTK3_LIBRARY_DIRS})
+    add_compile_options(${GTK3_CFLAGS_OTHER})
 
-  # --- Per-configuration Linux flags ---
+    # Global Linux libraries
+    link_libraries(stdc++fs dl lz4 pthread rt)
+
+    # Link groups for executables (resolves circular deps)
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--start-group")
+    set(CMAKE_CXX_STANDARD_LIBRARIES "${CMAKE_CXX_STANDARD_LIBRARIES} -Wl,--end-group")
+  endif()
+
+  # --- Per-configuration flags (shared Linux/macOS) ---
   # Checked
   string(APPEND CMAKE_C_FLAGS_CHECKED " -fsanitize=address")
   string(APPEND CMAKE_CXX_FLAGS_CHECKED " -fsanitize=address")
   string(APPEND CMAKE_EXE_LINKER_FLAGS_CHECKED " -fsanitize=address")
   add_compile_definitions(
     $<$<CONFIG:Checked>:DEBUG>
-    $<$<CONFIG:Checked>:_GLIBCXX_DEBUG>
   )
+  if(NOT APPLE)
+    add_compile_definitions($<$<CONFIG:Checked>:_GLIBCXX_DEBUG>)
+  endif()
 
   # Debug
   add_compile_definitions(
     $<$<CONFIG:Debug>:DEBUG>
     $<$<CONFIG:Debug>:_NO_DEBUG_HEAP=1>
-    $<$<CONFIG:Debug>:_GLIBCXX_DEBUG>
   )
+  if(NOT APPLE)
+    add_compile_definitions($<$<CONFIG:Debug>:_GLIBCXX_DEBUG>)
+  endif()
 
   # Release
   add_compile_definitions(
@@ -220,10 +273,12 @@ else()
     $<$<CONFIG:Release>:_NO_DEBUG_HEAP=1>
   )
   add_compile_options($<$<CONFIG:Release>:-O3>)
-  # Link-time optimization (use lld to avoid system linker LTO plugin version mismatch)
+  # Link-time optimization
   add_compile_options($<$<CONFIG:Release>:-flto=thin>)
   add_link_options($<$<CONFIG:Release>:-flto=thin>)
-  add_link_options($<$<CONFIG:Release>:-fuse-ld=lld>)
+  if(NOT APPLE)
+    add_link_options($<$<CONFIG:Release>:-fuse-ld=lld>)
+  endif()
   # No symbols in release on non-Windows
   string(REPLACE "-g" "" CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE}")
   string(REPLACE "-g" "" CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE}")
@@ -246,3 +301,8 @@ set(CMAKE_FOLDER "")
 
 # Set default startup project for Visual Studio
 set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT xenia-app)
+
+# macOS app bundle and DMG packaging
+if(APPLE)
+  include(cmake/MacOSBundle.cmake)
+endif()

@@ -12,7 +12,9 @@ xe_target_defaults(xenia-core)
 # All subdirectories
 add_subdirectory(base)
 add_subdirectory(cpu)
-add_subdirectory(cpu/backend/x64)
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+  add_subdirectory(cpu/backend/x64)
+endif()
 add_subdirectory(apu)
 add_subdirectory(apu/nop)
 add_subdirectory(gpu)
@@ -47,3 +49,6 @@ if(WIN32)
   add_subdirectory(hid/xinput)
   add_subdirectory(ui/d3d12)
 endif()
+
+# macOS: Vulkan + SDL modules are already included above.
+# No macOS-only subdirectories needed yet.

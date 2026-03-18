@@ -21,6 +21,8 @@
 namespace xe {
 namespace debugging {
 
+#if !defined(__APPLE__)
+// macOS provides its own implementations in debugging_mac.cc
 bool IsDebuggerAttached() {
   std::ifstream proc_status_stream("/proc/self/status");
   if (!proc_status_stream.is_open()) {
@@ -51,6 +53,7 @@ void Break() {
   });
   std::raise(SIGTRAP);
 }
+#endif  // !__APPLE__
 
 namespace internal {
 void DebugPrint(const char* s) { std::clog << s << std::endl; }

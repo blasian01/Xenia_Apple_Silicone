@@ -32,6 +32,12 @@
 #include "xenia/base/main_android.h"
 #endif
 
+#if XE_PLATFORM_MAC
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+#include <sys/sysctl.h>
+#endif
+
 namespace xe {
 namespace memory {
 
@@ -100,7 +106,17 @@ PageAccess ToXeniaProtectFlags(const char* protection) {
   return PageAccess::kNoAccess;
 }
 
-bool IsWritableExecutableMemorySupported() { return true; }
+bool IsWritableExecutableMemorySupported() {
+#if XE_PLATFORM_MAC
+  // macOS with hardened runtime enforces W^X. Under Rosetta 2 on Apple
+  // Silicon, MAP_JIT allows toggling between writable and executable.
+  // For x86_64 native or Rosetta, MAP_JIT + pthread_jit_write_protect_np
+  // is the supported path.
+  return true;
+#else
+  return true;
+#endif
+}
 
 struct MappedFileRange {
   uintptr_t region_begin;
@@ -146,7 +162,27 @@ void* AllocFixed(void* base_address, size_t length,
       }
       return nullptr;
     }
+#if XE_PLATFORM_MAC
+    // macOS does not have MAP_FIXED_NOREPLACE. Use MAP_FIXED but first check
+    // if the region is available using mach_vm_region.
+    mach_vm_address_t check_addr = (mach_vm_address_t)base_address;
+    mach_vm_size_t check_size = 0;
+    vm_region_basic_info_data_64_t info;
+    mach_msg_type_number_t info_count = VM_REGION_BASIC_INFO_COUNT_64;
+    mach_port_t object_name;
+    kern_return_t kr = mach_vm_region(
+        mach_task_self(), &check_addr, &check_size,
+        VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info,
+        &info_count, &object_name);
+    if (kr == KERN_SUCCESS && check_addr <= (mach_vm_address_t)base_address &&
+        check_addr + check_size > (mach_vm_address_t)base_address) {
+      // Region is already mapped.
+      return nullptr;
+    }
+    flags |= MAP_FIXED;
+#else
     flags |= MAP_FIXED_NOREPLACE;
+#endif
   }
 
   void* result = mmap(base_address, length, prot, flags, -1, 0);
@@ -200,8 +236,44 @@ bool Protect(void* base_address, size_t length, PageAccess access,
 }
 
 bool QueryProtect(void* base_address, size_t& length, PageAccess& access_out) {
-  // No generic POSIX solution exists. The Linux solution should work on all
-  // Linux kernel based OS, including Android.
+#if XE_PLATFORM_MAC
+  // Use Mach VM APIs on macOS instead of /proc/self/maps
+  mach_vm_address_t addr = (mach_vm_address_t)base_address;
+  mach_vm_size_t size = 0;
+  vm_region_basic_info_data_64_t info;
+  mach_msg_type_number_t info_count = VM_REGION_BASIC_INFO_COUNT_64;
+  mach_port_t object_name;
+
+  kern_return_t kr = mach_vm_region(
+      mach_task_self(), &addr, &size,
+      VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info,
+      &info_count, &object_name);
+
+  if (kr != KERN_SUCCESS) {
+    return false;
+  }
+
+  // Convert Mach VM protection to Xenia PageAccess
+  bool readable = (info.protection & VM_PROT_READ) != 0;
+  bool writable = (info.protection & VM_PROT_WRITE) != 0;
+  bool executable = (info.protection & VM_PROT_EXECUTE) != 0;
+
+  if (readable && writable && executable) {
+    access_out = PageAccess::kExecuteReadWrite;
+  } else if (readable && executable) {
+    access_out = PageAccess::kExecuteReadOnly;
+  } else if (readable && writable) {
+    access_out = PageAccess::kReadWrite;
+  } else if (readable) {
+    access_out = PageAccess::kReadOnly;
+  } else {
+    access_out = PageAccess::kNoAccess;
+  }
+
+  length = size - ((mach_vm_address_t)base_address - addr);
+  return true;
+#else
+  // Linux: read /proc/self/maps
   std::ifstream memory_maps;
   memory_maps.open("/proc/self/maps", std::ios_base::in);
   std::string maps_entry_string;
@@ -210,7 +282,7 @@ bool QueryProtect(void* base_address, size_t& length, PageAccess& access_out) {
     std::stringstream entry_stream(maps_entry_string);
     uintptr_t map_region_begin, map_region_end;
     char separator;
-    char protection[5];  // 4 chars (e.g., "r-xp") + null terminator
+    char protection[5];
 
     entry_stream >> std::hex >> map_region_begin >> separator >>
         map_region_end >> protection;
@@ -221,11 +293,10 @@ bool QueryProtect(void* base_address, size_t& length, PageAccess& access_out) {
 
       access_out = ToXeniaProtectFlags(protection);
 
-      // Look at the next consecutive mappings
       while (std::getline(memory_maps, maps_entry_string)) {
         std::stringstream next_entry_stream(maps_entry_string);
         uintptr_t next_map_region_begin, next_map_region_end;
-        char next_protection[5];  // 4 chars (e.g., "r-xp") + null terminator
+        char next_protection[5];
 
         next_entry_stream >> std::hex >> next_map_region_begin >> separator >>
             next_map_region_end >> next_protection;
@@ -245,6 +316,7 @@ bool QueryProtect(void* base_address, size_t& length, PageAccess& access_out) {
 
   memory_maps.close();
   return false;
+#endif
 }
 
 FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path,
@@ -296,7 +368,12 @@ FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path,
   if (ret < 0) {
     return kFileMappingHandleInvalid;
   }
+  // macOS uses ftruncate (off_t is 64-bit natively), Linux has ftruncate64
+#if XE_PLATFORM_MAC
+  if (ftruncate(ret, length) < 0) {
+#else
   if (ftruncate64(ret, length) < 0) {
+#endif
     close(ret);
     shm_unlink(full_path.c_str());
     return kFileMappingHandleInvalid;
@@ -335,7 +412,11 @@ void* MapFileView(FileMappingHandle handle, void* base_address, size_t length,
 
   int flags = MAP_SHARED;
   if (base_address != nullptr) {
+#if XE_PLATFORM_MAC
+    flags |= MAP_FIXED;
+#else
     flags |= MAP_FIXED_NOREPLACE;
+#endif
   }
 
   void* result = mmap(base_address, length, prot, flags, handle, file_offset);

@@ -23,6 +23,10 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#if XE_PLATFORM_MAC
+#include <mach-o/dyld.h>
+#endif
+
 namespace xe {
 
 std::string path_to_utf8(const std::filesystem::path& path) {
@@ -42,10 +46,23 @@ std::filesystem::path to_path(const std::u16string_view source) {
 namespace filesystem {
 
 std::filesystem::path GetExecutablePath() {
+#if XE_PLATFORM_MAC
+  char buff[FILENAME_MAX] = "";
+  uint32_t size = sizeof(buff);
+  if (_NSGetExecutablePath(buff, &size) == 0) {
+    char resolved[PATH_MAX];
+    if (realpath(buff, resolved)) {
+      return std::string(resolved);
+    }
+    return std::string(buff);
+  }
+  return std::string();
+#else
   char buff[FILENAME_MAX] = "";
   readlink("/proc/self/exe", buff, FILENAME_MAX);
   std::string s(buff);
   return s;
+#endif
 }
 
 std::filesystem::path GetExecutableFolder() {
@@ -53,6 +70,14 @@ std::filesystem::path GetExecutableFolder() {
 }
 
 std::filesystem::path GetUserFolder() {
+#if XE_PLATFORM_MAC
+  // Use ~/Library/Application Support for macOS
+  char* home = std::getenv("HOME");
+  if (home) {
+    return std::filesystem::path(home) / "Library" / "Application Support";
+  }
+  return std::filesystem::path("/tmp");
+#else
   // get preferred data home
   char* home = std::getenv("XDG_DATA_HOME");
   if (home) {
@@ -73,6 +98,7 @@ std::filesystem::path GetUserFolder() {
   }
 
   return std::filesystem::path(home) / ".local" / "share";
+#endif
 }
 
 FILE* OpenFile(const std::filesystem::path& path, const std::string_view mode) {
@@ -80,10 +106,10 @@ FILE* OpenFile(const std::filesystem::path& path, const std::string_view mode) {
 }
 
 bool Seek(FILE* file, int64_t offset, int origin) {
-  return fseeko64(file, off64_t(offset), origin) == 0;
+  return fseeko(file, static_cast<off_t>(offset), origin) == 0;
 }
 
-int64_t Tell(FILE* file) { return int64_t(ftello64(file)); }
+int64_t Tell(FILE* file) { return int64_t(ftello(file)); }
 
 bool TruncateStdioFile(FILE* file, uint64_t length) {
   if (fflush(file)) {
@@ -93,7 +119,7 @@ bool TruncateStdioFile(FILE* file, uint64_t length) {
   if (position < 0) {
     return false;
   }
-  if (ftruncate64(fileno(file), off64_t(length))) {
+  if (ftruncate(fileno(file), static_cast<off_t>(length))) {
     return false;
   }
   if (uint64_t(position) > length) {

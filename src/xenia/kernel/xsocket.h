@@ -80,6 +80,23 @@ class XSocket : public XObject {
  public:
   static const XObject::Type kObjectType = XObject::Type::Socket;
 
+// Undef POSIX macros that collide with our enum values on macOS/Linux
+#ifdef AF_INET
+#undef AF_INET
+#endif
+#ifdef SOCK_STREAM
+#undef SOCK_STREAM
+#endif
+#ifdef SOCK_DGRAM
+#undef SOCK_DGRAM
+#endif
+#ifdef IPPROTO_TCP
+#undef IPPROTO_TCP
+#endif
+#ifdef IPPROTO_UDP
+#undef IPPROTO_UDP
+#endif
+
   enum AddressFamily {
     AF_INET = 2,
   };

@@ -475,7 +475,7 @@ bool EmulatorApp::OnInitialize() {
     if (!cvars::portable &&
         !std::filesystem::exists(storage_root / "portable.txt")) {
       storage_root = xe::filesystem::GetUserFolder();
-#if defined(XE_PLATFORM_WIN32) || defined(XE_PLATFORM_LINUX)
+#if defined(XE_PLATFORM_WIN32) || defined(XE_PLATFORM_LINUX) || defined(XE_PLATFORM_MAC)
       storage_root = storage_root / "Xenia";
 #else
       // TODO(Triang3l): Point to the app's external storage "files" directory

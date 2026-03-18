@@ -7,6 +7,11 @@
  ******************************************************************************
  */
 
+#include "xenia/base/platform.h"
+
+// macOS uses exception_handler_mac.cc instead.
+#if !XE_PLATFORM_MAC
+
 #include "xenia/base/exception_handler.h"
 
 #include <signal.h>
@@ -283,3 +288,5 @@ void ExceptionHandler::Uninstall(Handler fn, void* data) {
 }
 
 }  // namespace xe
+
+#endif  // !XE_PLATFORM_MAC
