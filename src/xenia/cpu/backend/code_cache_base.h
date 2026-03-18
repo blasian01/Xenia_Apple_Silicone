@@ -28,6 +28,10 @@
 #include "xenia/base/math.h"
 #include "xenia/base/memory.h"
 #include "xenia/base/mutex.h"
+
+#if XE_PLATFORM_MAC
+#include <pthread.h>
+#endif
 #include "xenia/cpu/backend/code_cache.h"
 #include "xenia/cpu/function.h"
 
@@ -175,6 +179,11 @@ class CodeCacheBase : public CodeCache {
       // Commit memory if needed.
       EnsureCommitted(high_mark);
 
+#if XE_PLATFORM_MAC
+      // Apple Silicon W^X: switch MAP_JIT region to writable before memcpy
+      pthread_jit_write_protect_np(0);
+#endif
+
       // Copy code.
       std::memcpy(code_write_address, machine_code, func_info.code_size.total);
 
@@ -182,6 +191,11 @@ class CodeCacheBase : public CodeCache {
       self().FillCode(
           tail_write_address,
           static_cast<size_t>(end_write_address - tail_write_address));
+
+#if XE_PLATFORM_MAC
+      // Switch back to executable
+      pthread_jit_write_protect_np(1);
+#endif
 
       // Flush I-cache for code and fill regions.
       self().FlushCodeRange(code_write_address, func_info.code_size.total);
@@ -219,7 +233,13 @@ class CodeCacheBase : public CodeCache {
       high_mark = generated_code_offset_;
     }
     EnsureCommitted(high_mark);
+#if XE_PLATFORM_MAC
+    pthread_jit_write_protect_np(0);
+#endif
     std::memcpy(data_address, data, length);
+#if XE_PLATFORM_MAC
+    pthread_jit_write_protect_np(1);
+#endif
     return uint32_t(uintptr_t(data_address));
   }
 
