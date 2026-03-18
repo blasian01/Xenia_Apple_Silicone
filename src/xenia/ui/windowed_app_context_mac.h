@@ -10,6 +10,8 @@
 #ifndef XENIA_UI_WINDOWED_APP_CONTEXT_MAC_H_
 #define XENIA_UI_WINDOWED_APP_CONTEXT_MAC_H_
 
+#include <SDL2/SDL_video.h>
+
 #include <deque>
 #include <functional>
 #include <mutex>
@@ -38,6 +40,7 @@ class MacWindowedAppContext final : public WindowedAppContext {
 
  private:
   bool is_running_ = true;
+  bool vulkan_library_loaded_ = false;
 };
 
 }  // namespace ui

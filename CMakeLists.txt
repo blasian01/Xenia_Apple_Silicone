@@ -301,8 +301,3 @@ set(CMAKE_FOLDER "")
 
 # Set default startup project for Visual Studio
 set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT xenia-app)
-
-# macOS app bundle and DMG packaging
-if(APPLE)
-  include(cmake/MacOSBundle.cmake)
-endif()

@@ -129,3 +129,7 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 endif()
 
 xe_target_defaults(xenia-app)
+
+if(APPLE)
+  include(${PROJECT_SOURCE_DIR}/cmake/MacOSBundle.cmake)
+endif()

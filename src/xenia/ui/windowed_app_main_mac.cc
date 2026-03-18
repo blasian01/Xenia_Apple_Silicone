@@ -16,6 +16,7 @@
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/ui/windowed_app.h"
+#include "xenia/ui/window_mac.h"
 #include "xenia/ui/windowed_app_context_mac.h"
 
 extern "C" int main(int argc, char** argv) {
@@ -23,6 +24,9 @@ extern "C" int main(int argc, char** argv) {
 
   {
     xe::ui::MacWindowedAppContext app_context;
+    if (!app_context.Initialize()) {
+      return EXIT_FAILURE;
+    }
 
     std::unique_ptr<xe::ui::WindowedApp> app =
         xe::ui::GetWindowedAppCreator()(app_context);
@@ -35,30 +39,19 @@ extern "C" int main(int argc, char** argv) {
     xe::InitializeLogging(app->GetName());
 
     if (app->OnInitialize()) {
-      // SDL event loop
-      bool running = true;
-      while (running) {
+      while (app_context.is_running()) {
         SDL_Event event;
-        while (SDL_PollEvent(&event)) {
-          switch (event.type) {
-            case SDL_QUIT:
-              running = false;
+        if (SDL_WaitEventTimeout(&event, 16)) {
+          do {
+            if (event.type == SDL_QUIT) {
+              app_context.QuitFromUIThread();
               break;
-            case SDL_WINDOWEVENT:
-              if (event.window.event == SDL_WINDOWEVENT_CLOSE) {
-                running = false;
-              }
-              break;
-            default:
-              break;
-          }
+            }
+            xe::ui::MacWindow::DispatchSDLEvent(event);
+          } while (app_context.is_running() && SDL_PollEvent(&event));
         }
 
-        // Process any pending UI thread functions
-        app_context.ExecutePendingFunctionsFromUIThread();
-
-        // Small sleep to prevent 100% CPU usage
-        SDL_Delay(1);
+        app_context.ProcessPendingFunctions();
       }
       result = EXIT_SUCCESS;
     } else {

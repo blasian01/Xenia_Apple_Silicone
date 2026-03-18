@@ -17,6 +17,7 @@
 #include "xenia/cpu/stack_walker.h"
 
 #ifdef __APPLE__
+#include <sys/mman.h>
 #include <pthread.h>
 #include <libkern/OSCacheControl.h>
 #endif
@@ -70,15 +71,29 @@ bool A64Backend::Initialize(Processor* processor) {
     return false;
   }
 
-  // Allocate guest trampoline memory
+  // Allocate guest trampoline memory using MAP_JIT for Apple Silicon
+#ifdef __APPLE__
+  guest_trampoline_memory_ = reinterpret_cast<uint8_t*>(
+      mmap(nullptr, GUEST_TRAMPOLINE_END - GUEST_TRAMPOLINE_BASE,
+           PROT_READ | PROT_WRITE | PROT_EXEC,
+           MAP_PRIVATE | MAP_ANONYMOUS | MAP_JIT, -1, 0));
+  if (guest_trampoline_memory_ == MAP_FAILED) {
+    XELOGW("ARM64: Failed to allocate trampoline memory (non-fatal)");
+    guest_trampoline_memory_ = nullptr;
+  }
+#else
   guest_trampoline_memory_ = reinterpret_cast<uint8_t*>(
       xe::memory::AllocFixed(
-          reinterpret_cast<void*>(uintptr_t(GUEST_TRAMPOLINE_BASE)),
+          nullptr,
           GUEST_TRAMPOLINE_END - GUEST_TRAMPOLINE_BASE,
           xe::memory::AllocationType::kCommit,
           xe::memory::PageAccess::kExecuteReadWrite));
+#endif
   trampoline_offset_ = 0;
+  XELOGI("ARM64: Trampoline memory: {:p}",
+         (void*)guest_trampoline_memory_);
 
+  XELOGI("ARM64: Generating thunks...");
   // Generate thunks using our ARM64 assembler
   A64Asm thunk_asm;
 
@@ -292,7 +307,13 @@ uint32_t A64Backend::CreateGuestTrampoline(GuestTrampolineProc proc,
   }
 
   uint8_t* dest = guest_trampoline_memory_ + trampoline_offset_;
+#ifdef __APPLE__
+  pthread_jit_write_protect_np(0);
+#endif
   memcpy(dest, tramp.code(), size);
+#ifdef __APPLE__
+  pthread_jit_write_protect_np(1);
+#endif
 
 #ifdef __APPLE__
   sys_dcache_flush(dest, size);

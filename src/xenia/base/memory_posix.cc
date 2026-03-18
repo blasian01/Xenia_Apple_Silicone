@@ -232,7 +232,19 @@ bool Protect(void* base_address, size_t length, PageAccess access,
   }
 
   uint32_t prot = ToPosixProtectFlags(access);
-  return mprotect(base_address, length, prot) == 0;
+  
+  // Apple Silicon uses 16KB pages, but Xenia guest memory (Xbox) uses 4K pages.
+  // mprotect requires the address to be aligned to the host page size.
+  uintptr_t page_mask = page_size() - 1;
+  uintptr_t addr = reinterpret_cast<uintptr_t>(base_address);
+  uintptr_t aligned_addr = addr & ~page_mask;
+  size_t aligned_len = ((addr + length + page_mask) & ~page_mask) - aligned_addr;
+
+  if (mprotect((void*)aligned_addr, aligned_len, prot) == 0) {
+    return true;
+  }
+  fprintf(stderr, "mprotect failed for address %p (aligned %p), length %zu (aligned %zu), prot %u: %s\n", base_address, (void*)aligned_addr, length, aligned_len, prot, strerror(errno));
+  return false;
 }
 
 bool QueryProtect(void* base_address, size_t& length, PageAccess& access_out) {

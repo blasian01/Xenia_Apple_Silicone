@@ -10,7 +10,10 @@
 #include "xenia/ui/vulkan/vulkan_instance.h"
 
 #include <sstream>
+#include <cstring>
 #include <string>
+#include <filesystem>
+#include <limits.h>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -25,6 +28,9 @@
 #elif XE_PLATFORM_WIN32
 #include "xenia/base/platform_win.h"
 #endif
+#if XE_PLATFORM_MAC
+#include <mach-o/dyld.h>
+#endif
 
 DEFINE_bool(
     vulkan_log_debug_messages, true,
@@ -35,6 +41,23 @@ DEFINE_bool(
 namespace xe {
 namespace ui {
 namespace vulkan {
+
+#if XE_PLATFORM_MAC
+namespace {
+
+std::filesystem::path GetBundledFrameworkPath(const std::filesystem::path& file_name) {
+  char executable_path[PATH_MAX];
+  uint32_t executable_path_capacity = sizeof(executable_path);
+  if (_NSGetExecutablePath(executable_path, &executable_path_capacity) != 0) {
+    return {};
+  }
+
+  std::filesystem::path bundle_path = executable_path;
+  return bundle_path.parent_path().parent_path() / "Frameworks" / file_name;
+}
+
+}  // namespace
+#endif
 
 std::unique_ptr<VulkanInstance> VulkanInstance::Create(
     const bool with_surface, const bool try_enable_validation) {
@@ -59,11 +82,33 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(
   const char* const loader_library_name = "libvulkan.so.1";
 #endif
   // http://developer.download.nvidia.com/mobile/shield/assets/Vulkan/UsingtheVulkanAPI.pdf
-  vulkan_instance->loader_ = dlopen(loader_library_name, RTLD_NOW | RTLD_LOCAL);
+  vulkan_instance->loader_ = nullptr;
+#if XE_PLATFORM_MAC
+  const std::filesystem::path bundled_loader_path =
+      GetBundledFrameworkPath("libvulkan.1.dylib");
+  if (!bundled_loader_path.empty() &&
+      std::filesystem::exists(bundled_loader_path)) {
+    vulkan_instance->loader_ =
+        dlopen(bundled_loader_path.string().c_str(), RTLD_NOW | RTLD_LOCAL);
+  }
+#endif
+  if (!vulkan_instance->loader_) {
+    vulkan_instance->loader_ = dlopen(loader_library_name, RTLD_NOW | RTLD_LOCAL);
+  }
   if (!vulkan_instance->loader_) {
     // Try MoltenVK directly on macOS
 #if XE_PLATFORM_MAC
-    vulkan_instance->loader_ = dlopen("libMoltenVK.dylib", RTLD_NOW | RTLD_LOCAL);
+    const std::filesystem::path bundled_moltenvk_path =
+        GetBundledFrameworkPath("libMoltenVK.dylib");
+    if (!bundled_moltenvk_path.empty() &&
+        std::filesystem::exists(bundled_moltenvk_path)) {
+      vulkan_instance->loader_ = dlopen(bundled_moltenvk_path.string().c_str(),
+                                        RTLD_NOW | RTLD_LOCAL);
+    }
+    if (!vulkan_instance->loader_) {
+      vulkan_instance->loader_ =
+          dlopen("libMoltenVK.dylib", RTLD_NOW | RTLD_LOCAL);
+    }
     if (!vulkan_instance->loader_) {
 #endif
     XELOGE("Failed to load {}", loader_library_name);

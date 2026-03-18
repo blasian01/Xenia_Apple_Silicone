@@ -1156,7 +1156,10 @@ bool BaseHeap::AllocRange(uint32_t low_address, uint32_t high_address,
         TranslateRelative(start_page_number << page_size_shift_),
         page_count << page_size_shift_, alloc_type, ToPageAccess(protect));
     if (!result) {
-      XELOGE("BaseHeap::Alloc failed to alloc range from host");
+      XELOGE(
+          "BaseHeap::Alloc failed to alloc range from host (address:{:p} size:{} alloc_type:{} protect:{})",
+          (void*)TranslateRelative(start_page_number << page_size_shift_),
+          page_count << page_size_shift_, (uint32_t)alloc_type, protect);
       return false;
     }
 
