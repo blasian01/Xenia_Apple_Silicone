@@ -5,6 +5,7 @@
 #define XENIA_CPU_BACKEND_A64_A64_EMITTER_H_
 
 #include <vector>
+#include <unordered_map>
 
 #include "xenia/base/arena.h"
 #include "xenia/cpu/backend/a64/a64_asm.h"
@@ -80,6 +81,10 @@ class A64Emitter {
   // Mark source offset for debug
   void MarkSourceOffset(const hir::Instr* i);
 
+  // Label management for intra-function branches
+  a64::Label* GetLabel(uint32_t hir_label_id);
+  void BindLabel(uint32_t hir_label_id);
+
  private:
   void* Emplace(const EmitFunctionInfo& func_info,
                 GuestFunction* function = nullptr);
@@ -95,6 +100,10 @@ class A64Emitter {
   Arena source_map_arena_;
   size_t stack_size_ = 0;
   uint32_t current_guest_function_ = 0;
+
+  // HIR label id → A64 label for branch resolution
+  std::unordered_map<uint32_t, a64::Label*> label_map_;
+  std::vector<a64::Label*> label_storage_;  // owns the labels
 
   // GPR register map: index → physical register number
   static const uint32_t gpr_reg_map_[GPR_COUNT];

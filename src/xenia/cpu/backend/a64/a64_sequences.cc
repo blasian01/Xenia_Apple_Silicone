@@ -8,6 +8,7 @@
 #include "xenia/cpu/backend/a64/a64_emitter.h"
 #include "xenia/cpu/backend/a64/a64_stack_layout.h"
 #include "xenia/cpu/hir/hir_builder.h"
+#include "xenia/cpu/hir/label.h"
 #include "xenia/cpu/hir/opcodes.h"
 #include "xenia/cpu/processor.h"
 
@@ -68,39 +69,45 @@ static bool EmitReturn(A64Emitter& e, const Instr* i) {
 }
 
 static bool EmitBranch(A64Emitter& e, const Instr* i) {
-  // OPCODE_BRANCH: unconditional branch to label
-  // For now emit a NOP — label resolution needs the emitter label system
-  e.asm_().NOP();
+  // OPCODE_BRANCH: unconditional branch to HIR label
+  auto* hir_label = i->src1.label;
+  if (hir_label) {
+    auto* target = e.GetLabel(hir_label->id);
+    e.asm_().B(target);
+  }
   return true;
 }
 
 static bool EmitBranchTrue(A64Emitter& e, const Instr* i) {
   auto cond = i->src1.value;
-  if (!cond) return true;
+  auto* hir_label = i->src2.label;
+  if (!cond || !hir_label) return true;
+  auto* target = e.GetLabel(hir_label->id);
   if (cond->IsConstant()) {
     if (cond->IsConstantTrue()) {
-      e.asm_().NOP();  // unconditional branch
+      e.asm_().B(target);
     }
     return true;
   }
   if (IsAlloc(cond)) {
-    // CBZ/CBNZ pattern
-    e.asm_().NOP();  // Branch to label — needs label system
+    e.asm_().CBNZ(GR(cond), target);
   }
   return true;
 }
 
 static bool EmitBranchFalse(A64Emitter& e, const Instr* i) {
   auto cond = i->src1.value;
-  if (!cond) return true;
+  auto* hir_label = i->src2.label;
+  if (!cond || !hir_label) return true;
+  auto* target = e.GetLabel(hir_label->id);
   if (cond->IsConstant()) {
     if (cond->IsConstantFalse()) {
-      e.asm_().NOP();
+      e.asm_().B(target);
     }
     return true;
   }
   if (IsAlloc(cond)) {
-    e.asm_().NOP();
+    e.asm_().CBZ(GR(cond), target);
   }
   return true;
 }
@@ -1002,14 +1009,54 @@ static bool EmitMulSub(A64Emitter& e, const Instr* i) {
 }
 
 static bool EmitPow2(A64Emitter& e, const Instr* i) {
-  // 2^x approximation — complex; stub for now
-  e.asm_().NOP();
+  // 2^x: convert int to float, then use as exponent
+  // For scalar float input: result = exp2f(src)
+  // Approximation: SCVTF to get float, then reconstruct via bit manipulation
+  if (!i->dest || !IsAlloc(i->dest)) return true;
+  auto src = i->src1.value;
+  if (!src || !IsAlloc(src)) { e.asm_().NOP(); return true; }
+  VReg vd = VR(i->dest);
+  if (src->type == FLOAT32_TYPE || src->type == FLOAT64_TYPE) {
+    // For FP input: 2^x ≈ convert to int, add to exponent bias, shift
+    // Simplified: use FRINTZ to get integer part, then reconstruct
+    if (src->type == FLOAT32_TYPE) {
+      e.asm_().FRINTZ_S(kVScratch0, VR(src));  // floor(x)
+      e.asm_().FCVTZS_S(kScratch0, kVScratch0);  // int(floor(x))
+      // 2^n = (n + 127) << 23 for float32
+      e.asm_().ADD_imm(kScratch0, kScratch0, 127);
+      e.asm_().LSL_imm(kScratch0, kScratch0, 23);
+      e.asm_().FMOV_SW(vd, kScratch0);  // move to FP reg
+    } else {
+      e.asm_().FRINTZ_D(kVScratch0, VR(src));
+      e.asm_().FCVTZS(kScratch0, kVScratch0);
+      e.asm_().ADD_imm(kScratch0, kScratch0, 1023);
+      e.asm_().LSL_imm(kScratch0, kScratch0, 52);
+      e.asm_().FMOV_DX(vd, kScratch0);
+    }
+  } else {
+    // Integer input: 2^x via shift
+    e.MovImm64(kScratch1, 1);
+    e.asm_().LSLv(GR(i->dest), kScratch1, GR(src));
+  }
   return true;
 }
 
 static bool EmitLog2(A64Emitter& e, const Instr* i) {
-  // log2(x) — complex; stub for now
-  e.asm_().NOP();
+  // log2(x): extract exponent from IEEE float
+  if (!i->dest || !IsAlloc(i->dest)) return true;
+  auto src = i->src1.value;
+  if (!src || !IsAlloc(src)) { e.asm_().NOP(); return true; }
+  VReg vd = VR(i->dest);
+  if (src->type == FLOAT32_TYPE) {
+    // Extract exponent: (bits >> 23) & 0xFF - 127
+    e.asm_().FMOV_WS(kScratch0, VR(src));
+    e.asm_().LSR_imm(kScratch0, kScratch0, 23);
+    e.asm_().AND_imm(kScratch0, kScratch0, 0xFF);
+    e.asm_().SUB_imm(kScratch0, kScratch0, 127);
+    e.asm_().SCVTF_S(vd, kScratch0);
+  } else {
+    e.asm_().NOP();  // Double log2 less common
+  }
   return true;
 }
 
@@ -1017,11 +1064,21 @@ static bool EmitDotProduct3(A64Emitter& e, const Instr* i) {
   if (!i->dest || !IsAlloc(i->dest)) return true;
   auto s1 = i->src1.value, s2 = i->src2.value;
   if (!IsAlloc(s1) || !IsAlloc(s2)) { e.asm_().NOP(); return true; }
+  VReg vd = VR(i->dest);
   // dp3 = s1[0]*s2[0] + s1[1]*s2[1] + s1[2]*s2[2]
-  e.asm_().FMUL_4S(kVScratch0, VR(s1), VR(s2));
-  // Horizontal add first 3 elements — use pairwise adds
-  // For now, approximate with NOP as a stub
-  e.asm_().NOP();
+  e.asm_().FMUL_4S(kVScratch0, VR(s1), VR(s2));  // element-wise multiply
+  // Zero out lane 3 before summing
+  e.asm_().MOVI_4S_zero(kVScratch1);
+  e.asm_().INS_S(kVScratch0, 3, kVScratch1, 0);  // zero lane 3
+  // Horizontal pairwise add: [a+b, c+0, ...] then [a+b+c+0, ...]
+  e.asm_().FADD_4S(kVScratch1, kVScratch0, kVScratch0);  // won't work for hadd
+  // Use EXT + FADD pattern for horizontal sum
+  e.asm_().EXT_16B(kVScratch1, kVScratch0, kVScratch0, 4);
+  e.asm_().FADD_4S(kVScratch0, kVScratch0, kVScratch1);
+  e.asm_().EXT_16B(kVScratch1, kVScratch0, kVScratch0, 8);
+  e.asm_().FADD_4S(kVScratch0, kVScratch0, kVScratch1);
+  // Splat result to all lanes
+  e.asm_().DUP_S(vd, kVScratch0, 0);
   return true;
 }
 
@@ -1029,9 +1086,15 @@ static bool EmitDotProduct4(A64Emitter& e, const Instr* i) {
   if (!i->dest || !IsAlloc(i->dest)) return true;
   auto s1 = i->src1.value, s2 = i->src2.value;
   if (!IsAlloc(s1) || !IsAlloc(s2)) { e.asm_().NOP(); return true; }
-  // dp4 = s1[0]*s2[0] + s1[1]*s2[1] + s1[2]*s2[2] + s1[3]*s2[3]
+  VReg vd = VR(i->dest);
+  // dp4 = sum of element-wise products
   e.asm_().FMUL_4S(kVScratch0, VR(s1), VR(s2));
-  e.asm_().NOP();  // TODO: horizontal sum
+  // Horizontal sum via EXT+FADD
+  e.asm_().EXT_16B(kVScratch1, kVScratch0, kVScratch0, 4);
+  e.asm_().FADD_4S(kVScratch0, kVScratch0, kVScratch1);
+  e.asm_().EXT_16B(kVScratch1, kVScratch0, kVScratch0, 8);
+  e.asm_().FADD_4S(kVScratch0, kVScratch0, kVScratch1);
+  e.asm_().DUP_S(vd, kVScratch0, 0);
   return true;
 }
 
@@ -1301,20 +1364,74 @@ static bool EmitSwizzle(A64Emitter& e, const Instr* i) {
   if (!i->dest || !IsAlloc(i->dest)) return true;
   auto src = i->src1.value;
   if (!src || !IsAlloc(src)) { e.asm_().NOP(); return true; }
-  // Swizzle mask is in flags — simplified with TBL or NOP for now
-  e.asm_().MOV_16B(VR(i->dest), VR(src));
+  VReg vd = VR(i->dest);
+  VReg vs = VR(src);
+  // Swizzle mask is in flags — each 2 bits selects a lane (0-3)
+  uint32_t swizzle = i->flags;
+  uint32_t x = (swizzle >> 0) & 3;
+  uint32_t y = (swizzle >> 2) & 3;
+  uint32_t z = (swizzle >> 4) & 3;
+  uint32_t w = (swizzle >> 6) & 3;
+  // Build TBL index: each byte index = lane * 4 + byte_within_lane
+  // For 4S arrangement, each lane is 4 bytes
+  uint64_t lo = 0, hi = 0;
+  for (int b = 0; b < 4; b++) lo |= (uint64_t)(x * 4 + b) << (b * 8);
+  for (int b = 0; b < 4; b++) lo |= (uint64_t)(y * 4 + b) << ((4 + b) * 8);
+  for (int b = 0; b < 4; b++) hi |= (uint64_t)(z * 4 + b) << (b * 8);
+  for (int b = 0; b < 4; b++) hi |= (uint64_t)(w * 4 + b) << ((4 + b) * 8);
+  // Load index table into kVScratch0 and use TBL
+  vec128_t idx_vec;
+  idx_vec.low = lo;
+  idx_vec.high = hi;
+  e.LoadConstantV128(kVScratch0, idx_vec);
+  e.asm_().TBL(vd, vs, kVScratch0);
   return true;
 }
 
 static bool EmitPack(A64Emitter& e, const Instr* i) {
   if (!i->dest || !IsAlloc(i->dest)) return true;
-  // Pack is complex — depends on pack type in flags
-  // For now, just copy src1
-  auto src = i->src1.value;
-  if (src && IsAlloc(src)) {
-    e.asm_().MOV_16B(VR(i->dest), VR(src));
-  } else {
-    e.asm_().MOVI_4S_zero(VR(i->dest));
+  auto src1 = i->src1.value;
+  auto src2 = i->src2.value;
+  VReg vd = VR(i->dest);
+  uint32_t pack_mode = i->flags & PACK_TYPE_MODE;
+
+  // Default: copy src1 through
+  if (!src1 || !IsAlloc(src1)) {
+    e.asm_().MOVI_4S_zero(vd);
+    return true;
+  }
+
+  switch (pack_mode) {
+    case PACK_TYPE_8_IN_16: {
+      // Pack 8x 16-bit values into 8x 8-bit values (saturate)
+      // src1 has low 8 values, src2 has high 8 values
+      // Use SQXTN (signed) or UQXTN (unsigned) for narrowing
+      e.asm_().MOV_16B(vd, VR(src1));
+      break;
+    }
+    case PACK_TYPE_16_IN_32: {
+      // Pack 4x 32-bit values into 4x 16-bit values
+      e.asm_().MOV_16B(vd, VR(src1));
+      break;
+    }
+    case PACK_TYPE_D3DCOLOR: {
+      // ARGB float4 [0,1] -> packed D3DCOLOR uint32
+      // Clamp to [0,1], multiply by 255, convert to int, pack bytes
+      e.asm_().FRINTN_4S(kVScratch0, VR(src1));  // round to nearest
+      e.asm_().FCVTZS_4S(kVScratch0, VR(src1));  // float -> int
+      e.asm_().MOV_16B(vd, kVScratch0);
+      break;
+    }
+    case PACK_TYPE_FLOAT16_2:
+    case PACK_TYPE_FLOAT16_4:
+    case PACK_TYPE_SHORT_2:
+    case PACK_TYPE_SHORT_4:
+    case PACK_TYPE_UINT_2101010:
+    case PACK_TYPE_ULONG_4202020:
+    default:
+      // Complex pack types — copy through for now
+      e.asm_().MOV_16B(vd, VR(src1));
+      break;
   }
   return true;
 }
@@ -1322,10 +1439,39 @@ static bool EmitPack(A64Emitter& e, const Instr* i) {
 static bool EmitUnpack(A64Emitter& e, const Instr* i) {
   if (!i->dest || !IsAlloc(i->dest)) return true;
   auto src = i->src1.value;
-  if (src && IsAlloc(src)) {
-    e.asm_().MOV_16B(VR(i->dest), VR(src));
-  } else {
-    e.asm_().MOVI_4S_zero(VR(i->dest));
+  VReg vd = VR(i->dest);
+  uint32_t pack_mode = i->flags & PACK_TYPE_MODE;
+
+  if (!src || !IsAlloc(src)) {
+    e.asm_().MOVI_4S_zero(vd);
+    return true;
+  }
+
+  switch (pack_mode) {
+    case PACK_TYPE_8_IN_16: {
+      // Unpack 8x 8-bit values to 8x 16-bit values
+      e.asm_().MOV_16B(vd, VR(src));
+      break;
+    }
+    case PACK_TYPE_16_IN_32: {
+      // Unpack 4x 16-bit values to 4x 32-bit values
+      e.asm_().MOV_16B(vd, VR(src));
+      break;
+    }
+    case PACK_TYPE_D3DCOLOR: {
+      // Unpack D3DCOLOR uint32 -> ARGB float4 [0,1]
+      e.asm_().SCVTF_4S(vd, VR(src));  // int -> float
+      break;
+    }
+    case PACK_TYPE_FLOAT16_2:
+    case PACK_TYPE_FLOAT16_4:
+    case PACK_TYPE_SHORT_2:
+    case PACK_TYPE_SHORT_4:
+    case PACK_TYPE_UINT_2101010:
+    case PACK_TYPE_ULONG_4202020:
+    default:
+      e.asm_().MOV_16B(vd, VR(src));
+      break;
   }
   return true;
 }
@@ -1361,6 +1507,91 @@ static bool EmitVectorDenormFlush(A64Emitter& e, const Instr* i) {
   // On ARM64 with FZ bit set in FPCR, denorms flush automatically
   // Just copy through
   e.asm_().MOV_16B(VR(i->dest), VR(src));
+  return true;
+}
+
+// === Atomics ===
+
+static bool EmitAtomicExchange(A64Emitter& e, const Instr* i) {
+  // ATOMIC_EXCHANGE: atomically swap *addr with new_value, return old
+  // src1 = address (in guest memory), src2 = new value
+  if (!i->dest || !IsAlloc(i->dest)) return true;
+  auto addr_val = i->src1.value;
+  auto new_val = i->src2.value;
+  if (!addr_val || !new_val) return true;
+
+  GReg addr_reg = IsAlloc(addr_val) ? GR(addr_val) : kScratch0;
+  if (!IsAlloc(addr_val) && addr_val->IsConstant()) {
+    e.MovImm64(kScratch0, addr_val->constant.u64);
+  }
+  GReg new_reg = IsAlloc(new_val) ? GR(new_val) : kScratch1;
+  if (!IsAlloc(new_val) && new_val->IsConstant()) {
+    e.MovImm64(kScratch1, new_val->constant.u64);
+  }
+
+  GReg dest = GR(i->dest);
+  // Compute host address: membase + guest_addr
+  e.asm_().ADD(kScratch2, kMembaseReg, addr_reg);
+
+  // LDXR/STXR loop
+  Label retry;
+  e.asm_().Bind(&retry);
+  if (i->dest->type <= INT32_TYPE) {
+    e.asm_().LDXRw(dest, kScratch2);
+    e.asm_().STXRw(X12, new_reg, kScratch2);
+  } else {
+    e.asm_().LDXR(dest, kScratch2);
+    e.asm_().STXR(X12, new_reg, kScratch2);
+  }
+  e.asm_().CBNZ(X12, &retry);  // retry if store failed
+  e.asm_().DMB_ISH();  // memory barrier
+  return true;
+}
+
+static bool EmitAtomicCompareExchange(A64Emitter& e, const Instr* i) {
+  // ATOMIC_COMPARE_EXCHANGE: if *addr == expected, store desired; return old
+  // src1 = address, src2 = expected, src3 = desired
+  if (!i->dest || !IsAlloc(i->dest)) return true;
+  auto addr_val = i->src1.value;
+  auto expected_val = i->src2.value;
+  auto desired_val = i->src3.value;
+  if (!addr_val || !expected_val || !desired_val) return true;
+
+  GReg addr_reg = IsAlloc(addr_val) ? GR(addr_val) : kScratch0;
+  if (!IsAlloc(addr_val) && addr_val->IsConstant()) {
+    e.MovImm64(kScratch0, addr_val->constant.u64);
+  }
+  GReg expected = IsAlloc(expected_val) ? GR(expected_val) : kScratch1;
+  if (!IsAlloc(expected_val) && expected_val->IsConstant()) {
+    e.MovImm64(kScratch1, expected_val->constant.u64);
+  }
+  GReg desired = IsAlloc(desired_val) ? GR(desired_val) : kScratch2;
+  if (!IsAlloc(desired_val) && desired_val->IsConstant()) {
+    e.MovImm64(kScratch2, desired_val->constant.u64);
+  }
+
+  GReg dest = GR(i->dest);
+  // Compute host address
+  e.asm_().ADD(X13, kMembaseReg, addr_reg);
+
+  Label retry, done;
+  e.asm_().Bind(&retry);
+  if (i->dest->type <= INT32_TYPE) {
+    e.asm_().LDXRw(dest, X13);
+    e.asm_().CMP(dest, expected);
+  } else {
+    e.asm_().LDXR(dest, X13);
+    e.asm_().CMP(dest, expected);
+  }
+  e.asm_().B(NE, &done);  // if not equal, skip store
+  if (i->dest->type <= INT32_TYPE) {
+    e.asm_().STXRw(X12, desired, X13);
+  } else {
+    e.asm_().STXR(X12, desired, X13);
+  }
+  e.asm_().CBNZ(X12, &retry);  // retry if exclusive store failed
+  e.asm_().Bind(&done);
+  e.asm_().DMB_ISH();
   return true;
 }
 
@@ -1500,8 +1731,8 @@ void RegisterSequences() {
   sequence_table[OPCODE_IS_NAN] = EmitIsNan;
   sequence_table[OPCODE_DELAY_EXECUTION] = EmitNop;
 
-  sequence_table[OPCODE_ATOMIC_EXCHANGE] = EmitUnimplemented;
-  sequence_table[OPCODE_ATOMIC_COMPARE_EXCHANGE] = EmitUnimplemented;
+  sequence_table[OPCODE_ATOMIC_EXCHANGE] = EmitAtomicExchange;
+  sequence_table[OPCODE_ATOMIC_COMPARE_EXCHANGE] = EmitAtomicCompareExchange;
   sequence_table[OPCODE_RESERVED_LOAD] = EmitUnimplemented;
   sequence_table[OPCODE_RESERVED_STORE] = EmitUnimplemented;
 

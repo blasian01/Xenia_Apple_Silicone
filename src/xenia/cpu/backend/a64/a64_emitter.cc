@@ -9,6 +9,7 @@
 #include "xenia/cpu/backend/a64/a64_function.h"
 #include "xenia/cpu/backend/a64/a64_sequences.h"
 #include "xenia/cpu/backend/a64/a64_stack_layout.h"
+#include "xenia/cpu/hir/label.h"
 #include "xenia/cpu/processor.h"
 
 namespace xe {
@@ -17,11 +18,9 @@ namespace backend {
 namespace a64 {
 
 // Map virtual register indices to physical ARM64 registers.
-// x21-x28 are callee-saved and used for register allocation.
 const uint32_t A64Emitter::gpr_reg_map_[GPR_COUNT] = {
     X21, X22, X23, X24, X25, X26, X27, X28,
 };
-// v16-v31 are caller-saved and used for NEON register allocation.
 const uint32_t A64Emitter::vreg_reg_map_[VREG_COUNT] = {
     V16, V17, V18, V19, V20, V21, V22, V23,
     V24, V25, V26, V27, V28, V29, V30, V31,
@@ -32,7 +31,11 @@ A64Emitter::A64Emitter(A64Backend* backend)
       backend_(backend),
       code_cache_(backend->code_cache()) {}
 
-A64Emitter::~A64Emitter() = default;
+A64Emitter::~A64Emitter() {
+  for (auto* label : label_storage_) {
+    delete label;
+  }
+}
 
 GReg A64Emitter::GprForIndex(uint32_t index) {
   assert(index < GPR_COUNT);
@@ -49,25 +52,35 @@ void A64Emitter::MovImm64(GReg rd, uint64_t imm) {
 }
 
 void A64Emitter::LoadConstantV128(VReg vd, const vec128_t& v) {
-  // Load 128-bit constant via scratch GPR + INS
-  // Store constant to stack scratch area, then load via LDR Q
   asm__.MOV64(kScratch0, v.low);
   asm__.MOV64(kScratch1, v.high);
-  // Use stack scratch area at [SP + StackLayout::GUEST_SCRATCH]
   asm__.STR(kScratch0, SP, StackLayout::GUEST_SCRATCH);
   asm__.STR(kScratch1, SP, StackLayout::GUEST_SCRATCH + 8);
   asm__.LDR_Q(vd, SP, StackLayout::GUEST_SCRATCH);
 }
 
+a64::Label* A64Emitter::GetLabel(uint32_t hir_label_id) {
+  auto it = label_map_.find(hir_label_id);
+  if (it != label_map_.end()) {
+    return it->second;
+  }
+  auto* label = new a64::Label();
+  label_map_[hir_label_id] = label;
+  label_storage_.push_back(label);
+  return label;
+}
+
+void A64Emitter::BindLabel(uint32_t hir_label_id) {
+  auto* label = GetLabel(hir_label_id);
+  asm__.Bind(label);
+}
+
 void A64Emitter::EmitPrologue(size_t stack_size) {
-  // Save LR and allocate stack
   stack_size_ = stack_size;
   size_t total = StackLayout::GUEST_STACK_SIZE + stack_size;
   total = (total + 15) & ~15;  // 16-byte align
 
-  // STP x29, x30, [sp, #-total]! (pre-index)
   asm__.STP_pre(X29, X30, SP, -(int32_t)total);
-  // Set frame pointer
   asm__.MOV(X29, SP);
 }
 
@@ -75,7 +88,6 @@ void A64Emitter::EmitEpilogue(size_t stack_size) {
   size_t total = StackLayout::GUEST_STACK_SIZE + stack_size;
   total = (total + 15) & ~15;
 
-  // Restore frame and return
   asm__.LDP_post(X29, X30, SP, (int32_t)total);
   asm__.RET();
 }
@@ -93,8 +105,26 @@ bool A64Emitter::Emit(GuestFunction* function, hir::HIRBuilder* builder,
   debug_info_flags_ = debug_info_flags;
   current_guest_function_ = function->address();
 
-  // Calculate stack size from HIR
+  // Clear label map from previous emission
+  label_map_.clear();
+  for (auto* label : label_storage_) {
+    delete label;
+  }
+  label_storage_.clear();
+
+  // Pre-create labels for all HIR blocks
   auto block = builder->first_block();
+  while (block) {
+    auto hir_label = block->label_head;
+    while (hir_label) {
+      GetLabel(hir_label->id);  // creates if not exists
+      hir_label = hir_label->next;
+    }
+    block = block->next;
+  }
+
+  // Calculate stack size from HIR
+  block = builder->first_block();
   stack_size_ = 0;
   while (block) {
     auto instr = block->instr_head;
@@ -150,13 +180,20 @@ bool A64Emitter::EmitBody(hir::HIRBuilder* builder,
                           EmitFunctionInfo& func_info) {
   auto block = builder->first_block();
   while (block) {
+    // Bind all labels for this block
+    auto hir_label = block->label_head;
+    while (hir_label) {
+      BindLabel(hir_label->id);
+      hir_label = hir_label->next;
+    }
+
+    // Process instructions
     auto instr = block->instr_head;
     while (instr) {
       const hir::Instr* new_tail = nullptr;
       if (!SelectSequence(this, instr, &new_tail)) {
         XELOGE("ARM64: Unimplemented HIR opcode: {}",
                GetOpcodeName(instr->GetOpcodeNum()));
-        // Emit NOP for unimplemented opcodes to keep going
         asm__.NOP();
       }
       instr = instr->next;
