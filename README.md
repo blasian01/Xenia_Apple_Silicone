@@ -8,13 +8,13 @@
 
 ## 👋 About This Fork
 
-Hey, my name is **Bronson**. I grew up on the Xbox 360 — it was the console that defined my childhood. Halo 3, Gears of War, Forza, you name it. Those games mean a lot to me.
+Hey, my name is **Bronson**. I grew up on the Xbox 360 — it was the console that defined my childhood. Halo 4, Castle Miner Z, Bo2, you name it. Those games mean a lot to me.
 
 Fast forward to today and I'm in a position where I only have an Apple Mac. Xenia is the best Xbox 360 emulator out there, but it only officially supports Windows. Rather than accept that, I decided to try and build a **native macOS application** for Xenia on Apple Silicon.
 
 This fork contains all the changes needed to compile and run Xenia natively on **macOS arm64 (Apple Silicon)** — no Rosetta, no Wine, no CrossOver. Just a native `.app` bundle you can drop into your Applications folder.
 
-> **⚠️ Important Disclaimer:** This is an experimental port. The x64 CPU JIT backend (which translates Xbox 360 PowerPC code to x86) is excluded on arm64 since it can't run on ARM hardware. The app will build and launch, but running actual Xbox 360 games will require a future ARM64 JIT backend. This is a work in progress!
+> **⚠️ Important Disclaimer:** This is an experimental port. With the help of my monkey brain and AI I am trying to get this fully working with a proper DMG built as well as a working x64 CPU JIT backend for ARM64. I am only working on this in my free time so things might not work :/ 
 
 ---
 
