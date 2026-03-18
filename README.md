@@ -14,7 +14,7 @@ Fast forward to today and I'm in a position where I only have an Apple Mac. Xeni
 
 This fork contains all the changes needed to compile and run Xenia natively on **macOS arm64 (Apple Silicon)** — no Rosetta, no Wine, no CrossOver. Just a native `.app` bundle you can drop into your Applications folder.
 
-> **⚠️ Important Disclaimer:** This is an experimental port. With the help of my monkey brain and AI I am trying to get this fully working with a proper DMG built as well as a working x64 CPU JIT backend for ARM64. I am only working on this in my free time so things might not work :/ 
+> **⚠️ Important Disclaimer:** This is an experimental port. With the help of my monkey brain and AI I am trying to get this fully working with a proper DMG built as well as a working x64 CPU JIT backend for ARM64. I am only working on this in my free time so things might not work :/
 
 ---
 
@@ -36,11 +36,16 @@ Make sure you have these installed on your Mac:
   ```bash
   brew install python3
   ```
-- **Vulkan SDK** (for the graphics backend)
-  - Download from [LunarG](https://vulkan.lunarg.com/sdk/home#mac) or install via:
+- **SDL2** (for input and audio)
   ```bash
+  brew install sdl2
+  ```
+- **Vulkan SDK + MoltenVK** (required for GPU rendering — translates Vulkan → Metal)
+  ```bash
+  brew install molten-vk
   brew install --cask vulkan-sdk
   ```
+  > MoltenVK is what makes Vulkan work on macOS by translating it to Apple's Metal API. **Without it, the app will launch but immediately fail with "Failed to load Vulkan Portability library".**
 
 ### Clone the Repo
 
@@ -71,21 +76,38 @@ The build takes a few minutes. When it's done, the app bundle is at:
 build/bin/macOS/Xenia.app
 ```
 
-### Package as DMG
+### First Launch Fix
+
+macOS will block the app because it's not signed by an Apple Developer account. You **must** run these commands before opening for the first time:
+
+```bash
+# Clear quarantine flag and ad-hoc sign the app
+xattr -cr build/bin/macOS/Xenia.app
+codesign --force --deep --sign - build/bin/macOS/Xenia.app
+```
+
+Then open it:
+```bash
+open build/bin/macOS/Xenia.app
+```
+
+If macOS still shows a "damaged or incomplete" warning, right-click the app → **Open** → click **Open** in the dialog.
+
+### Package as DMG (Optional)
 
 To create a distributable `.dmg` file:
 
 ```bash
-cmake --build build-macos --target xenia-dmg
+hdiutil create -srcfolder build/bin/macOS/Xenia.app -volname "Xenia" -format UDZO build/Xenia.dmg
 ```
 
-This creates `build/Xenia.dmg`. Open it and drag `Xenia.app` to your Applications folder.
+This creates `build/Xenia.dmg`. Open it and drag `Xenia.app` to your Applications folder. **Remember to run the `xattr -cr` and `codesign` commands on the copy in Applications too.**
 
 ### Verify the Build
 
 ```bash
 # Confirm it's a native arm64 binary
-file build/bin/macOS/Xenia.app/Contents/MacOS/Xenia
+file build/bin/macOS/Xenia.app/Contents/MacOS/xenia-app
 # Should output: Mach-O 64-bit executable arm64
 ```
 
@@ -106,21 +128,30 @@ file build/bin/macOS/Xenia.app/Contents/MacOS/Xenia
 
 ### Game Compatibility
 
-Check the [Xenia Canary Game Compatibility List](https://github.com/xenia-canary/game-compatibility/issues) to see which games are known to work. Keep in mind that this macOS port may have additional limitations beyond the base compatibility list due to the Vulkan backend on MoltenVK.
+Check the [Xenia Canary Game Compatibility List](https://github.com/xenia-canary/game-compatibility/issues) to see which games are known to work. Keep in mind that this macOS port may have additional limitations beyond the base compatibility list due to the ARM64 JIT backend and MoltenVK GPU translation layer.
 
 ### Tips
 
-- **Vulkan drivers**: macOS uses [MoltenVK](https://github.com/KhronosGroup/MoltenVK) to translate Vulkan to Metal. Make sure the Vulkan SDK is installed.
+- **MoltenVK is required**: The GPU rendering pipeline is Vulkan → MoltenVK → Metal. Without MoltenVK installed, the app window won't open.
 - **First launch**: The first time you open a game it may take longer as shaders are compiled and cached.
-- **Performance**: Native arm64 means no translation overhead for the emulator itself, but GPU-intensive games may still be demanding.
-- **Logs**: If something goes wrong, check the log output in the terminal for error details.
+- **Performance**: Native arm64 means no translation overhead for the emulator itself. The ARM64 JIT backend compiles Xbox 360 PPC instructions directly to native ARM64 code on the fly.
+- **Logs**: If something goes wrong, check `~/Library/Application Support/Xenia/` for logs, or run the app from Terminal to see console output.
+- **GPU acceleration**: M1/M2/M3/M4 GPU hardware is used automatically through the Metal API via MoltenVK.
 
 ---
 
 ## 🔧 What Was Changed
 
-This fork makes the following changes to build on macOS arm64:
+This fork makes the following changes to build and run on macOS arm64:
 
+### ARM64 JIT Backend (New)
+- **Complete ARM64 code generator** — 100+ HIR opcode handlers translating Xbox 360 PPC instructions to native ARM64 machine code
+- **150+ ARM64 instruction encodings** including integer, FP, NEON vector, and atomic operations
+- **Runtime infrastructure** — resolve-function thunk for on-demand JIT compilation, host↔guest thunks, guest trampolines
+- **Branch label system** for intra-function control flow (B/CBNZ/CBZ to HIR labels)
+- **Atomic operations** using ARM64 exclusive access (LDXR/STXR) with memory barriers
+
+### Platform Adaptation
 - **Platform stubs** for macOS (message boxes, file pickers, window management, system functions)
 - **Architecture guards** to exclude x86-specific code (AVX intrinsics, x64 JIT backend, SSE defines) on arm64
 - **ARM64 NEON compatibility** fixes for `constexpr` issues with AppleClang
