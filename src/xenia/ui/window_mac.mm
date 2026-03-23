@@ -20,6 +20,8 @@
 
 #include "xenia/base/logging.h"
 #include "xenia/ui/surface_mac.h"
+#include "xenia/ui/ui_event.h"
+#include "xenia/ui/virtual_key.h"
 
 #import <AppKit/AppKit.h>
 #import <QuartzCore/QuartzCore.h>
@@ -193,6 +195,128 @@ void MacWindow::DispatchSDLEvent(const SDL_Event& event) {
         window->HandlePaintRequest();
       }
     } break;
+    case SDL_MOUSEBUTTONDOWN:
+    case SDL_MOUSEBUTTONUP: {
+      if (auto* window = GetMacWindowByID(event.button.windowID)) {
+        MouseEvent::Button button = MouseEvent::Button::kNone;
+        switch (event.button.button) {
+          case SDL_BUTTON_LEFT:
+            button = MouseEvent::Button::kLeft;
+            break;
+          case SDL_BUTTON_RIGHT:
+            button = MouseEvent::Button::kRight;
+            break;
+          case SDL_BUTTON_MIDDLE:
+            button = MouseEvent::Button::kMiddle;
+            break;
+          case SDL_BUTTON_X1:
+            button = MouseEvent::Button::kX1;
+            break;
+          case SDL_BUTTON_X2:
+            button = MouseEvent::Button::kX2;
+            break;
+        }
+        // Scale from logical (SDL window) to physical (drawable) coordinates
+        // for Retina displays.
+        float scale = 1.0f;
+        if (window->sdl_window()) {
+          int ww, wh, dw, dh;
+          SDL_GetWindowSize(window->sdl_window(), &ww, &wh);
+          SDL_Vulkan_GetDrawableSize(window->sdl_window(), &dw, &dh);
+          if (ww > 0) scale = static_cast<float>(dw) / static_cast<float>(ww);
+        }
+        int32_t x = static_cast<int32_t>(event.button.x * scale);
+        int32_t y = static_cast<int32_t>(event.button.y * scale);
+        MouseEvent e(window, button, x, y);
+        WindowDestructionReceiver destruction_receiver(window);
+        if (event.type == SDL_MOUSEBUTTONDOWN) {
+          window->OnMouseDown(e, destruction_receiver);
+        } else {
+          window->OnMouseUp(e, destruction_receiver);
+        }
+      }
+    } break;
+    case SDL_MOUSEMOTION: {
+      if (auto* window = GetMacWindowByID(event.motion.windowID)) {
+        float scale = 1.0f;
+        if (window->sdl_window()) {
+          int ww, wh, dw, dh;
+          SDL_GetWindowSize(window->sdl_window(), &ww, &wh);
+          SDL_Vulkan_GetDrawableSize(window->sdl_window(), &dw, &dh);
+          if (ww > 0) scale = static_cast<float>(dw) / static_cast<float>(ww);
+        }
+        int32_t x = static_cast<int32_t>(event.motion.x * scale);
+        int32_t y = static_cast<int32_t>(event.motion.y * scale);
+        MouseEvent e(window, MouseEvent::Button::kNone, x, y);
+        WindowDestructionReceiver destruction_receiver(window);
+        window->OnMouseMove(e, destruction_receiver);
+      }
+    } break;
+    case SDL_MOUSEWHEEL: {
+      if (auto* window = GetMacWindowByID(event.wheel.windowID)) {
+        int32_t mx, my;
+        SDL_GetMouseState(&mx, &my);
+        float scale = 1.0f;
+        if (window->sdl_window()) {
+          int ww, wh, dw, dh;
+          SDL_GetWindowSize(window->sdl_window(), &ww, &wh);
+          SDL_Vulkan_GetDrawableSize(window->sdl_window(), &dw, &dh);
+          if (ww > 0) scale = static_cast<float>(dw) / static_cast<float>(ww);
+        }
+        int32_t x = static_cast<int32_t>(mx * scale);
+        int32_t y = static_cast<int32_t>(my * scale);
+        // SDL scroll: positive Y = away from user (forward), which matches
+        // Xenia's convention. Multiply by scroll detent constant.
+        int32_t scroll_x =
+            event.wheel.x * static_cast<int32_t>(MouseEvent::kScrollPerDetent);
+        int32_t scroll_y =
+            event.wheel.y * static_cast<int32_t>(MouseEvent::kScrollPerDetent);
+        if (event.wheel.direction == SDL_MOUSEWHEEL_FLIPPED) {
+          scroll_x = -scroll_x;
+          scroll_y = -scroll_y;
+        }
+        MouseEvent e(window, MouseEvent::Button::kNone, x, y, scroll_x,
+                     scroll_y);
+        WindowDestructionReceiver destruction_receiver(window);
+        window->OnMouseWheel(e, destruction_receiver);
+      }
+    } break;
+    case SDL_KEYDOWN:
+    case SDL_KEYUP: {
+      if (auto* window = GetMacWindowByID(event.key.windowID)) {
+        VirtualKey vk = window->TranslateSDLKey(event.key.keysym);
+        bool shift = (event.key.keysym.mod & KMOD_SHIFT) != 0;
+        bool ctrl = (event.key.keysym.mod & KMOD_CTRL) != 0;
+        bool alt = (event.key.keysym.mod & KMOD_ALT) != 0;
+        bool super = (event.key.keysym.mod & KMOD_GUI) != 0;
+        bool prev_state = event.key.repeat != 0;
+        KeyEvent e(window, vk, event.key.repeat ? event.key.repeat : 1,
+                   prev_state, shift, ctrl, alt, super);
+        WindowDestructionReceiver destruction_receiver(window);
+        if (event.type == SDL_KEYDOWN) {
+          window->OnKeyDown(e, destruction_receiver);
+        } else {
+          window->OnKeyUp(e, destruction_receiver);
+        }
+      }
+    } break;
+    case SDL_TEXTINPUT: {
+      if (auto* window = GetMacWindowByID(event.text.windowID)) {
+        // Each character in the text input is a separate key char event
+        const char* text = event.text.text;
+        while (*text) {
+          uint32_t ch = static_cast<uint8_t>(*text);
+          if (ch >= 0x20) {  // Printable
+            KeyEvent e(window, static_cast<VirtualKey>(ch), 1, false, false,
+                       false, false, false);
+            WindowDestructionReceiver destruction_receiver(window);
+            window->OnKeyChar(e, destruction_receiver);
+            if (destruction_receiver.IsWindowDestroyed()) break;
+          }
+          ++text;
+        }
+      }
+    } break;
     default:
       break;
   }
@@ -355,6 +479,84 @@ void MacWindow::RequestPaintImpl() {
   event.user.data1 = reinterpret_cast<void*>(uintptr_t(window_id_));
   event.user.data2 = nullptr;
   SDL_PushEvent(&event);
+}
+
+VirtualKey MacWindow::TranslateSDLKey(const SDL_Keysym& keysym) {
+  switch (keysym.sym) {
+    case SDLK_a: return VirtualKey::kA;
+    case SDLK_b: return VirtualKey::kB;
+    case SDLK_c: return VirtualKey::kC;
+    case SDLK_d: return VirtualKey::kD;
+    case SDLK_e: return VirtualKey::kE;
+    case SDLK_f: return VirtualKey::kF;
+    case SDLK_g: return VirtualKey::kG;
+    case SDLK_h: return VirtualKey::kH;
+    case SDLK_i: return VirtualKey::kI;
+    case SDLK_j: return VirtualKey::kJ;
+    case SDLK_k: return VirtualKey::kK;
+    case SDLK_l: return VirtualKey::kL;
+    case SDLK_m: return VirtualKey::kM;
+    case SDLK_n: return VirtualKey::kN;
+    case SDLK_o: return VirtualKey::kO;
+    case SDLK_p: return VirtualKey::kP;
+    case SDLK_q: return VirtualKey::kQ;
+    case SDLK_r: return VirtualKey::kR;
+    case SDLK_s: return VirtualKey::kS;
+    case SDLK_t: return VirtualKey::kT;
+    case SDLK_u: return VirtualKey::kU;
+    case SDLK_v: return VirtualKey::kV;
+    case SDLK_w: return VirtualKey::kW;
+    case SDLK_x: return VirtualKey::kX;
+    case SDLK_y: return VirtualKey::kY;
+    case SDLK_z: return VirtualKey::kZ;
+    case SDLK_0: return VirtualKey::k0;
+    case SDLK_1: return VirtualKey::k1;
+    case SDLK_2: return VirtualKey::k2;
+    case SDLK_3: return VirtualKey::k3;
+    case SDLK_4: return VirtualKey::k4;
+    case SDLK_5: return VirtualKey::k5;
+    case SDLK_6: return VirtualKey::k6;
+    case SDLK_7: return VirtualKey::k7;
+    case SDLK_8: return VirtualKey::k8;
+    case SDLK_9: return VirtualKey::k9;
+    case SDLK_UP: return VirtualKey::kUp;
+    case SDLK_DOWN: return VirtualKey::kDown;
+    case SDLK_LEFT: return VirtualKey::kLeft;
+    case SDLK_RIGHT: return VirtualKey::kRight;
+    case SDLK_BACKSPACE: return VirtualKey::kBack;
+    case SDLK_TAB: return VirtualKey::kTab;
+    case SDLK_RETURN: return VirtualKey::kReturn;
+    case SDLK_LCTRL: return VirtualKey::kLControl;
+    case SDLK_RCTRL: return VirtualKey::kRControl;
+    case SDLK_LALT: return VirtualKey::kLMenu;
+    case SDLK_RALT: return VirtualKey::kRMenu;
+    case SDLK_LSHIFT: return VirtualKey::kLShift;
+    case SDLK_RSHIFT: return VirtualKey::kRShift;
+    case SDLK_SPACE: return VirtualKey::kSpace;
+    case SDLK_CAPSLOCK: return VirtualKey::kCapital;
+    case SDLK_ESCAPE: return VirtualKey::kEscape;
+    case SDLK_F1: return VirtualKey::kF1;
+    case SDLK_F2: return VirtualKey::kF2;
+    case SDLK_F3: return VirtualKey::kF3;
+    case SDLK_F4: return VirtualKey::kF4;
+    case SDLK_F5: return VirtualKey::kF5;
+    case SDLK_F6: return VirtualKey::kF6;
+    case SDLK_F7: return VirtualKey::kF7;
+    case SDLK_F8: return VirtualKey::kF8;
+    case SDLK_F9: return VirtualKey::kF9;
+    case SDLK_F10: return VirtualKey::kF10;
+    case SDLK_F11: return VirtualKey::kF11;
+    case SDLK_F12: return VirtualKey::kF12;
+    case SDLK_DELETE: return VirtualKey::kDelete;
+    case SDLK_HOME: return VirtualKey::kHome;
+    case SDLK_END: return VirtualKey::kEnd;
+    case SDLK_PAGEUP: return VirtualKey::kPrior;
+    case SDLK_PAGEDOWN: return VirtualKey::kNext;
+    case SDLK_INSERT: return VirtualKey::kInsert;
+    case SDLK_PAUSE: return VirtualKey::kPause;
+    default:
+      return VirtualKey(keysym.sym);
+  }
 }
 
 void MacWindow::HandleWindowEvent(const SDL_WindowEvent& event) {

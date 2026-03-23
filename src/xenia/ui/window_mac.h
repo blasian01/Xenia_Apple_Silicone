@@ -51,6 +51,7 @@ class MacWindow : public Window {
   void HandleWindowEvent(const SDL_WindowEvent& event);
   void HandleDropEvent(const SDL_DropEvent& event);
   void HandlePaintRequest();
+  VirtualKey TranslateSDLKey(const SDL_Keysym& keysym);
 
   uint32_t window_id_ = 0;
   SDL_Window* sdl_window_ = nullptr;
