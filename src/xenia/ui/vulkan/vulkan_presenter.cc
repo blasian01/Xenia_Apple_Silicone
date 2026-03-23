@@ -689,10 +689,19 @@ VulkanPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(
     render_pass_attachment.loadOp = cvars::present_render_pass_clear
                                         ? VK_ATTACHMENT_LOAD_OP_CLEAR
                                         : VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+#if XE_PLATFORM_MAC
+    // On macOS, we issue an explicit vkCmdClearColorImage before the render
+    // pass to work around MoltenVK issues with packed formats. Use LOAD to
+    // preserve the pre-cleared contents and set initialLayout accordingly.
+    render_pass_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    render_pass_attachment.initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+#endif
     render_pass_attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     render_pass_attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
     render_pass_attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+#if !XE_PLATFORM_MAC
     render_pass_attachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+#endif
     render_pass_attachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
     VkAttachmentReference render_pass_color_attachment;
     render_pass_color_attachment.attachment = 0;
@@ -1509,6 +1518,61 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(
   swapchain_image_clear_attachment.clearValue.color.float32[1] = 0.0f;
   swapchain_image_clear_attachment.clearValue.color.float32[2] = 0.0f;
   swapchain_image_clear_attachment.clearValue.color.float32[3] = 1.0f;
+
+#if XE_PLATFORM_MAC
+  // WORKAROUND: MoltenVK does not reliably honor VK_ATTACHMENT_LOAD_OP_CLEAR
+  // for packed formats like VK_FORMAT_A2B10G10R10_UNORM_PACK32, leaving
+  // uninitialized VRAM visible (green gradient). Issue an explicit
+  // vkCmdClearColorImage before the render pass to guarantee a clean slate.
+  {
+    VkImageMemoryBarrier pre_clear_barrier = {};
+    pre_clear_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    pre_clear_barrier.srcAccessMask = 0;
+    pre_clear_barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    pre_clear_barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    pre_clear_barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    pre_clear_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    pre_clear_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    pre_clear_barrier.image =
+        paint_context_.swapchain_images[swapchain_image_index];
+    pre_clear_barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    pre_clear_barrier.subresourceRange.baseMipLevel = 0;
+    pre_clear_barrier.subresourceRange.levelCount = 1;
+    pre_clear_barrier.subresourceRange.baseArrayLayer = 0;
+    pre_clear_barrier.subresourceRange.layerCount = 1;
+    dfn.vkCmdPipelineBarrier(draw_command_buffer,
+                             VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
+                             nullptr, 1, &pre_clear_barrier);
+
+    VkClearColorValue clear_color = {};
+    clear_color.float32[0] = 0.0f;
+    clear_color.float32[1] = 0.0f;
+    clear_color.float32[2] = 0.0f;
+    clear_color.float32[3] = 1.0f;
+    VkImageSubresourceRange clear_range = {};
+    clear_range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    clear_range.baseMipLevel = 0;
+    clear_range.levelCount = 1;
+    clear_range.baseArrayLayer = 0;
+    clear_range.layerCount = 1;
+    dfn.vkCmdClearColorImage(draw_command_buffer,
+                             paint_context_.swapchain_images[swapchain_image_index],
+                             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear_color,
+                             1, &clear_range);
+
+    VkImageMemoryBarrier post_clear_barrier = pre_clear_barrier;
+    post_clear_barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    post_clear_barrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    post_clear_barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    post_clear_barrier.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    dfn.vkCmdPipelineBarrier(draw_command_buffer,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0,
+                             nullptr, 0, nullptr, 1, &post_clear_barrier);
+    swapchain_image_clear_needed = false;
+  }
+#endif  // XE_PLATFORM_MAC
 
   VkRenderPassBeginInfo swapchain_render_pass_begin_info;
   swapchain_render_pass_begin_info.sType =
