@@ -425,6 +425,29 @@ void* MapFileView(FileMappingHandle handle, void* base_address, size_t length,
   int flags = MAP_SHARED;
   if (base_address != nullptr) {
 #if XE_PLATFORM_MAC
+    // macOS does not have MAP_FIXED_NOREPLACE. We must check if the region
+    // is available before using MAP_FIXED, otherwise we silently overwrite
+    // existing mappings (system libraries, frameworks, etc.)
+    mach_vm_address_t check_addr = (mach_vm_address_t)base_address;
+    mach_vm_size_t check_size = 0;
+    vm_region_basic_info_data_64_t info;
+    mach_msg_type_number_t info_count = VM_REGION_BASIC_INFO_COUNT_64;
+    mach_port_t object_name;
+    kern_return_t kr = mach_vm_region(
+        mach_task_self(), &check_addr, &check_size,
+        VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info,
+        &info_count, &object_name);
+    if (kr == KERN_SUCCESS) {
+      // Check if any existing mapping overlaps our requested range
+      uintptr_t req_begin = (uintptr_t)base_address;
+      uintptr_t req_end = req_begin + length;
+      uintptr_t map_begin = (uintptr_t)check_addr;
+      uintptr_t map_end = map_begin + (uintptr_t)check_size;
+      if (map_begin < req_end && map_end > req_begin) {
+        // Region is already partially or fully mapped - don't overwrite.
+        return nullptr;
+      }
+    }
     flags |= MAP_FIXED;
 #else
     flags |= MAP_FIXED_NOREPLACE;

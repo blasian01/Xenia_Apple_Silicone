@@ -118,7 +118,7 @@ enum class SignalType {
 
 int GetSystemSignal(SignalType num) {
   auto result = SIGRTMIN + static_cast<int>(num);
-  assert_true(result < SIGRTMAX);
+  assert_true(result <= SIGRTMAX);
   return result;
 }
 
