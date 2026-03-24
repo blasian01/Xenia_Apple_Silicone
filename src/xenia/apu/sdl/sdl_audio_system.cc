@@ -11,10 +11,36 @@
 
 #include "xenia/apu/apu_flags.h"
 #include "xenia/apu/sdl/sdl_audio_driver.h"
+#include "xenia/base/logging.h"
 
 namespace xe {
 namespace apu {
 namespace sdl {
+
+namespace {
+
+class SilentAudioDriver final : public AudioDriver {
+ public:
+  explicit SilentAudioDriver(xe::threading::Semaphore* semaphore)
+      : semaphore_(semaphore) {}
+
+  bool Initialize() override { return true; }
+  void Shutdown() override {}
+
+  void SubmitFrame(float* samples) override {
+    auto ret = semaphore_->Release(1, nullptr);
+    assert_true(ret);
+  }
+
+  void Pause() override {}
+  void Resume() override {}
+  void SetVolume(float volume) override {}
+
+ private:
+  xe::threading::Semaphore* semaphore_;
+};
+
+}  // namespace
 
 std::unique_ptr<AudioSystem> SDLAudioSystem::Create(cpu::Processor* processor) {
   return std::make_unique<SDLAudioSystem>(processor);
@@ -34,7 +60,16 @@ X_STATUS SDLAudioSystem::CreateDriver(size_t index,
   auto driver = std::make_unique<SDLAudioDriver>(semaphore);
   if (!driver->Initialize()) {
     driver->Shutdown();
-    return X_STATUS_UNSUCCESSFUL;
+    XELOGW(
+        "SDLAudioSystem::CreateDriver: falling back to silent driver for "
+        "client index {}",
+        index);
+    auto silent_driver = std::make_unique<SilentAudioDriver>(semaphore);
+    if (!silent_driver->Initialize()) {
+      return X_STATUS_UNSUCCESSFUL;
+    }
+    *out_driver = silent_driver.release();
+    return X_STATUS_SUCCESS;
   }
 
   *out_driver = driver.release();
@@ -50,10 +85,14 @@ AudioDriver* SDLAudioSystem::CreateDriver(xe::threading::Semaphore* semaphore,
 
 void SDLAudioSystem::DestroyDriver(AudioDriver* driver) {
   assert_not_null(driver);
-  auto sdldriver = dynamic_cast<SDLAudioDriver*>(driver);
-  assert_not_null(sdldriver);
-  sdldriver->Shutdown();
-  delete sdldriver;
+  if (auto sdldriver = dynamic_cast<SDLAudioDriver*>(driver)) {
+    sdldriver->Shutdown();
+    delete sdldriver;
+    return;
+  }
+
+  driver->Shutdown();
+  delete driver;
 }
 
 }  // namespace sdl

@@ -13,6 +13,8 @@ namespace a64 {
 
 class StackLayout {
  public:
+  static constexpr size_t HOST_FRAME_SAVE_SIZE = 0x10;
+
   /**
    * Thunk stack (host→guest transition):
    * SP must be 16-byte aligned at all times on ARM64.
@@ -52,20 +54,32 @@ class StackLayout {
   /**
    * Guest function stack:
    *  +------------------+
-   *  | scratch (48b)    | sp + 0x00  (6 x 8 bytes)
+   *  | x29 (fp)         | sp + 0x00
+   *  | x30 (lr)         | sp + 0x08
    *  +------------------+
-   *  | guest ret addr   | sp + 0x30
-   *  | call ret addr    | sp + 0x38
+   *  | guest frame base | sp + 0x10 (X29 points here)
    *  +------------------+
-   *  |  ... locals ...  | sp + 0x40+
+   *  +------------------+
+   *  | scratch (48b)    | fp + 0x00  (6 x 8 bytes)
+   *  +------------------+
+   *  | guest ret addr   | fp + 0x30
+   *  | call ret addr    | fp + 0x38
+   *  +------------------+
+   *  | x21-x28 save     | fp + 0x40
+   *  +------------------+
+   *  | v16-v31 save     | fp + 0x80
+   *  +------------------+
+   *  |  ... locals ...  | fp + 0x180+
    *  +------------------+
    *
-   *  Total header: 0x40 = 64 bytes (minimum, 16-byte aligned)
+   *  Guest header after the host save area: 0x180 = 384 bytes.
    */
-  static constexpr size_t GUEST_STACK_SIZE = 0x40;
+  static constexpr size_t GUEST_STACK_SIZE = 0x180;
   static constexpr size_t GUEST_SCRATCH = 0x00;
   static constexpr size_t GUEST_RET_ADDR = 0x30;
   static constexpr size_t GUEST_CALL_RET_ADDR = 0x38;
+  static constexpr size_t GUEST_GPR_SAVE = 0x40;
+  static constexpr size_t GUEST_VREG_SAVE = 0x80;
 };
 
 }  // namespace a64

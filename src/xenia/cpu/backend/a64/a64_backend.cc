@@ -3,6 +3,11 @@
  */
 #include "xenia/cpu/backend/a64/a64_backend.h"
 
+#include <atomic>
+#include <mutex>
+#include <unordered_set>
+
+#include "xenia/base/byte_order.h"
 #include "xenia/base/exception_handler.h"
 #include "xenia/base/logging.h"
 #include "xenia/cpu/backend/a64/a64_assembler.h"
@@ -13,6 +18,7 @@
 #include "xenia/cpu/backend/a64/a64_stack_layout.h"
 #include "xenia/cpu/breakpoint.h"
 #include "xenia/cpu/function.h"
+#include "xenia/cpu/ppc/ppc_opcode_info.h"
 #include "xenia/cpu/processor.h"
 #include "xenia/cpu/stack_walker.h"
 
@@ -27,13 +33,136 @@ namespace cpu {
 namespace backend {
 namespace a64 {
 
+namespace {
+
+bool ShouldDumpHotLoopWindow(uint32_t guest_target) {
+  switch (guest_target) {
+    case 0x820CC1AC:
+    case 0x820CC1B4:
+    case 0x820CC1F4:
+      return true;
+    default:
+      return false;
+  }
+}
+
+bool ShouldLogHotLoopState(uint32_t guest_target) {
+  switch (guest_target) {
+    case 0x820CC1AC:
+    case 0x820CC1B4:
+    case 0x820CC1F4:
+      return true;
+    default:
+      return false;
+  }
+}
+
+void LogHotLoopState(ppc::PPCContext_s* guest_context, uint32_t guest_target) {
+  static std::atomic<uint64_t> hot_loop_state_log_count{0};
+  uint64_t count = ++hot_loop_state_log_count;
+  if (count > 32 && (count % 128) != 0) {
+    return;
+  }
+
+  XELOGI(
+      "ARM64: loop state #{} target={:08X} r26={:08X} r27={:08X} r28={:08X} "
+      "r29={:08X} r30={:08X} r31={:08X} lr={:08X} ctr={:08X}",
+      count, guest_target, uint32_t(guest_context->r[26]),
+      uint32_t(guest_context->r[27]), uint32_t(guest_context->r[28]),
+      uint32_t(guest_context->r[29]), uint32_t(guest_context->r[30]),
+      uint32_t(guest_context->r[31]), uint32_t(guest_context->lr),
+      uint32_t(guest_context->ctr));
+}
+
+void LogGuestInstructionWindow(ThreadState* thread_state, Function* fn,
+                               uint32_t guest_target) {
+  uint32_t window_end = fn->end_address();
+  if (!window_end || window_end <= guest_target) {
+    window_end = guest_target + 0x40;
+  }
+  if (window_end > guest_target + 0x80) {
+    window_end = guest_target + 0x80;
+  }
+
+  XELOGI("ARM64: hot loop window start={:08X} end={:08X} fn_end={:08X}",
+         guest_target, window_end, fn->end_address());
+  for (uint32_t address = guest_target; address < window_end; address += 4) {
+    auto* guest_code_ptr =
+        thread_state->processor()->memory()->TranslateVirtual<const uint32_t*>(
+            address);
+    if (!guest_code_ptr) {
+      XELOGI("ARM64:   {:08X}: <unmapped>", address);
+      break;
+    }
+
+    uint32_t guest_code = xe::byte_swap(*guest_code_ptr);
+    StringBuffer disasm;
+    if (!ppc::DisasmPPC(address, guest_code, &disasm)) {
+      XELOGI("ARM64:   {:08X}: {:08X}", address, guest_code);
+      continue;
+    }
+
+    XELOGI("ARM64:   {:08X}: {:08X} {}", address, guest_code,
+           disasm.buffer());
+  }
+}
+
+void LogGuestInstructionRange(ThreadState* thread_state, uint32_t center,
+                              uint32_t instruction_count_before,
+                              uint32_t instruction_count_after) {
+  uint32_t start =
+      center >= instruction_count_before * 4
+          ? center - instruction_count_before * 4
+          : 0;
+  uint32_t end = center + instruction_count_after * 4;
+  XELOGI("ARM64: guest instruction range start={:08X} center={:08X} end={:08X}",
+         start, center, end);
+  for (uint32_t address = start; address <= end; address += 4) {
+    auto* guest_code_ptr =
+        thread_state->processor()->memory()->TranslateVirtual<const uint32_t*>(
+            address);
+    if (!guest_code_ptr) {
+      XELOGI("ARM64:   {:08X}: <unmapped>", address);
+      continue;
+    }
+
+    uint32_t guest_code = xe::byte_swap(*guest_code_ptr);
+    StringBuffer disasm;
+    if (!ppc::DisasmPPC(address, guest_code, &disasm)) {
+      XELOGI("ARM64:   {:08X}: {:08X}", address, guest_code);
+      continue;
+    }
+
+    XELOGI("ARM64:   {:08X}: {:08X} {}", address, guest_code,
+           disasm.buffer());
+  }
+}
+
+}  // namespace
+
 // C++ resolve helper — called from the resolve-function thunk
 // ARM64 ABI: x0 = raw_context (PPCContext*), x1 = target PPC address
 // Returns: host machine code address in x0
 extern "C" uint64_t A64ResolveFunction(void* raw_context,
                                         uint64_t target_address) {
+  static std::atomic<uint64_t> resolve_count{0};
+  static std::mutex hot_target_log_mutex;
+  static std::unordered_set<uint32_t> hot_target_log_once;
+  auto count = ++resolve_count;
+  if (count <= 10 || (count % 100) == 0) {
+    XELOGI("ARM64: ResolveFunction #{} target={:08X}", count, target_address);
+  }
+
   auto guest_context = reinterpret_cast<ppc::PPCContext_s*>(raw_context);
   auto thread_state = guest_context->thread_state;
+  if (!target_address) {
+    XELOGE(
+        "ARM64: ResolveFunction requested null target lr={:08X} ctr={:08X} "
+        "r1={:08X} r13={:08X}",
+        uint32_t(guest_context->lr), uint32_t(guest_context->ctr),
+        uint32_t(guest_context->r[1]), uint32_t(guest_context->r[13]));
+    LogGuestInstructionRange(thread_state, uint32_t(guest_context->lr), 6, 6);
+  }
   auto fn = thread_state->processor()->ResolveFunction(
       static_cast<uint32_t>(target_address));
   if (!fn) {
@@ -41,6 +170,37 @@ extern "C" uint64_t A64ResolveFunction(void* raw_context,
     return 0;
   }
   auto a64_fn = static_cast<A64Function*>(fn);
+
+  uint32_t guest_target = static_cast<uint32_t>(target_address);
+  if (ShouldLogHotLoopState(guest_target)) {
+    LogHotLoopState(guest_context, guest_target);
+  }
+  if (guest_target >= 0x820C0000 && guest_target < 0x820D0000) {
+    bool should_log = false;
+    {
+      std::lock_guard<std::mutex> lock(hot_target_log_mutex);
+      should_log = hot_target_log_once.insert(guest_target).second;
+    }
+    if (should_log) {
+      uint32_t guest_code = 0;
+      StringBuffer disasm;
+      if (auto* guest_code_ptr = thread_state->processor()->memory()
+                                     ->TranslateVirtual<const uint32_t*>(
+                                         guest_target)) {
+        guest_code = xe::byte_swap(*guest_code_ptr);
+        ppc::DisasmPPC(guest_target, guest_code, &disasm);
+      }
+      XELOGI(
+          "ARM64: hot target {:08X} -> {:p} len={} behavior={} opcode={:08X} {}",
+          guest_target, static_cast<void*>(a64_fn->machine_code()),
+          a64_fn->machine_code_length(), static_cast<int>(fn->behavior()),
+          guest_code, disasm.buffer());
+      if (ShouldDumpHotLoopWindow(guest_target)) {
+        LogGuestInstructionWindow(thread_state, fn, guest_target);
+      }
+    }
+  }
+
   return reinterpret_cast<uint64_t>(a64_fn->machine_code());
 }
 
@@ -66,6 +226,7 @@ bool A64Backend::Initialize(Processor* processor) {
 
   // Create code cache
   code_cache_ = A64CodeCache::Create();
+  Backend::code_cache_ = code_cache_.get();
   if (!code_cache_->Initialize()) {
     XELOGE("ARM64: Failed to initialize code cache");
     return false;
@@ -101,9 +262,12 @@ bool A64Backend::Initialize(Processor* processor) {
   // Callable as: void thunk(void* target, void* context, void* ret_addr)
   // ARM64 AAPCS64: x0=target, x1=context, x2=ret_addr
   {
-    // Save callee-saved registers
-    thunk_asm.STP_pre(X29, X30, SP, -(int32_t)StackLayout::THUNK_STACK_SIZE);
-    thunk_asm.MOV(X29, SP);
+    // Reserve the frame explicitly so the fixed offsets in StackLayout match
+    // the actual save locations. Using a pre-index STP for the full frame
+    // stores X29/X30 at SP+0 and would overlap the X19/X20 slots below.
+    thunk_asm.SUB(SP, SP, static_cast<uint32_t>(StackLayout::THUNK_STACK_SIZE));
+    thunk_asm.STP(X29, X30, SP, 0x50);
+    thunk_asm.ADD(X29, SP, 0x50);
 
     // Save callee-saved GPRs
     thunk_asm.STP(X19, X20, SP, 0x00);
@@ -138,8 +302,9 @@ bool A64Backend::Initialize(Processor* processor) {
     thunk_asm.LDP(X25, X26, SP, 0x30);
     thunk_asm.LDP(X27, X28, SP, 0x40);
 
-    // Restore frame and return
-    thunk_asm.LDP_post(X29, X30, SP, (int32_t)StackLayout::THUNK_STACK_SIZE);
+    // Restore frame and return.
+    thunk_asm.LDP(X29, X30, SP, 0x50);
+    thunk_asm.ADD(SP, SP, static_cast<uint32_t>(StackLayout::THUNK_STACK_SIZE));
     thunk_asm.RET();
   }
 
@@ -163,7 +328,7 @@ bool A64Backend::Initialize(Processor* processor) {
   {
     // Save x19 (context) to stack since target may clobber it
     thunk_asm.STP_pre(X29, X30, SP, -32);
-    thunk_asm.MOV(X29, SP);
+    thunk_asm.ADD(X29, SP, 0);
     // Save the target fn pointer
     thunk_asm.MOV(X9, X0);
     // Set args: x0 = context (x19), x1 = arg0, x2 = arg1
@@ -189,10 +354,12 @@ bool A64Backend::Initialize(Processor* processor) {
   // Then jumps to the resolved host address.
   thunk_asm.Reset();
   {
-    thunk_asm.STP_pre(X29, X30, SP, -48);
-    thunk_asm.MOV(X29, SP);
+    thunk_asm.STP_pre(X29, X30, SP, -64);
+    thunk_asm.ADD(X29, SP, 0);
     // Save callee-saved that we clobber
     thunk_asm.STP(X19, X20, SP, 16);
+    // Preserve the synthetic guest return address across the resolve call.
+    thunk_asm.STR(X2, SP, 32);
 
     // Call A64ResolveFunction(context=x19, target=x9)
     thunk_asm.MOV(X0, X19);  // arg0: context
@@ -204,8 +371,9 @@ bool A64Backend::Initialize(Processor* processor) {
     thunk_asm.MOV(X8, X0);
 
     // Restore and jump to resolved function
+    thunk_asm.LDR(X2, SP, 32);
     thunk_asm.LDP(X19, X20, SP, 16);
-    thunk_asm.LDP_post(X29, X30, SP, 48);
+    thunk_asm.LDP_post(X29, X30, SP, 64);
     thunk_asm.BR(X8);  // Jump (not call) to resolved function
   }
   thunk_info.code_size.total = thunk_asm.code_size();
@@ -335,8 +503,73 @@ bool A64Backend::ExceptionCallbackThunk(Exception* ex, void* data) {
 }
 
 bool A64Backend::ExceptionCallback(Exception* ex) {
+  uint32_t inst = 0;
+  if (ex->pc()) {
+    // Only read inst if it's safe - but we could fault here. Ignore for now.
+    // inst = *reinterpret_cast<uint32_t*>(ex->pc());
+  }
+  
+  // Handle Access Violations
+  if (ex->code() == Exception::Code::kAccessViolation) {
+    XELOGE("ARM64: PAGE FAULT / ACCESS VIOLATION at pc={:016X} fault_addr={:016X} write={}",
+           ex->pc(), ex->fault_address(), 
+           ex->access_violation_operation() == Exception::AccessViolationOperation::kWrite);
+    if (auto* thread_context = ex->thread_context()) {
+      XELOGE(
+          "ARM64: regs x19={:016X} x20={:016X} x21={:016X} x22={:016X} "
+          "x23={:016X} x24={:016X} x25={:016X} x26={:016X} x27={:016X} "
+          "x28={:016X} sp={:016X}",
+          thread_context->x[19], thread_context->x[20], thread_context->x[21],
+          thread_context->x[22], thread_context->x[23], thread_context->x[24],
+          thread_context->x[25], thread_context->x[26], thread_context->x[27],
+          thread_context->x[28], thread_context->sp);
+      auto* guest_context =
+          reinterpret_cast<ppc::PPCContext*>(thread_context->x[19]);
+      if (guest_context) {
+        XELOGE(
+            "ARM64: guest ctx r1={:08X} r3={:08X} r13={:08X} lr={:08X} "
+            "ctr={:08X} cr0={:02X}{:02X}{:02X}{:02X}",
+            uint32_t(guest_context->r[1]), uint32_t(guest_context->r[3]),
+            uint32_t(guest_context->r[13]), uint32_t(guest_context->lr),
+            uint32_t(guest_context->ctr), uint8_t(guest_context->cr0.cr0_lt),
+            uint8_t(guest_context->cr0.cr0_gt),
+            uint8_t(guest_context->cr0.cr0_eq),
+            uint8_t(guest_context->cr0.cr0_so));
+      }
+    }
+    if (code_cache_) {
+      if (auto* function =
+              static_cast<A64Function*>(code_cache_->LookupFunction(ex->pc()))) {
+        auto code_offset = uint32_t(ex->pc() -
+                                    reinterpret_cast<uintptr_t>(
+                                        function->machine_code()));
+        XELOGE("ARM64: fault in guest function {:08X} host_offset={:X}",
+               function->address(), code_offset);
+        if (auto* source_entry = function->LookupMachineCodeOffset(code_offset)) {
+          XELOGE("ARM64: nearest guest instruction {:08X} hir_offset={:08X}",
+                 source_entry->guest_address, source_entry->hir_offset);
+          if (auto* guest_code_ptr = processor()->memory()->TranslateVirtual<
+                  const uint32_t*>(source_entry->guest_address)) {
+            uint32_t guest_code = xe::byte_swap(*guest_code_ptr);
+            StringBuffer disasm;
+            if (ppc::DisasmPPC(source_entry->guest_address, guest_code,
+                               &disasm)) {
+              XELOGE("ARM64: guest opcode {:08X} {}", guest_code,
+                     disasm.buffer());
+            }
+          }
+        }
+      }
+    }
+           
+    // Let other handlers (like emulator.cc or mmio_handler) take care of it
+    return false;
+  }
+
   // Handle BRK instructions as breakpoints
   if (ex->code() == Exception::Code::kIllegalInstruction) {
+    XELOGE("ARM64: BRK/illegal instruction at host PC {:016X} — likely unimplemented opcode",
+           ex->pc());
     return processor()->OnThreadBreakpointHit(ex);
   }
   return false;

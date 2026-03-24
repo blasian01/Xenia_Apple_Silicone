@@ -7,6 +7,7 @@
  ******************************************************************************
  */
 
+#include <atomic>
 #include <cwctype>
 
 #include "xenia/kernel/xboxkrnl/xboxkrnl_rtl.h"
@@ -499,15 +500,28 @@ DECLARE_XBOXKRNL_EXPORT1(RtlImageDirectoryEntryToData, kNone, kImplemented);
 
 pointer_result_t RtlImageXexHeaderField_entry(pointer_t<xex2_header> xex_header,
                                               dword_t field_dword) {
+  static std::atomic<uint64_t> call_count{0};
+  const auto count = ++call_count;
   uint32_t field_value = 0;
   uint32_t field = field_dword;  // VS acts weird going from dword_t -> enum
 
   if (!xex_header) {
+    if (count <= 16) {
+      XELOGI(
+          "ARM64DBG: RtlImageXexHeaderField call #{} xex_header=0 field={:08X} -> 0",
+          count, field);
+    }
     return field_value;
   }
 
   UserModule::GetOptHeader(kernel_memory(), xex_header, xex2_header_keys(field),
                            &field_value);
+
+  if (count <= 16) {
+    XELOGI(
+        "ARM64DBG: RtlImageXexHeaderField call #{} xex_header={:08X} field={:08X} -> {:08X}",
+        count, xex_header.guest_address(), field, field_value);
+  }
 
   return field_value;
 }
@@ -546,6 +560,8 @@ void xeRtlInitializeCriticalSection(X_RTL_CRITICAL_SECTION* cs,
   cs->header.type = 1;      // EventSynchronizationObject (auto reset)
   cs->header.absolute = 0;  // spin count div 256
   cs->header.signal_state = 0;
+  cs->header.wait_list.flink_ptr = 0;
+  cs->header.wait_list.blink_ptr = 0;
   cs->lock_count = -1;
   cs->recursion_count = 0;
   cs->owning_thread = 0;
@@ -569,6 +585,8 @@ X_STATUS xeRtlInitializeCriticalSectionAndSpinCount(X_RTL_CRITICAL_SECTION* cs,
   cs->header.type = 1;  // EventSynchronizationObject (auto reset)
   cs->header.absolute = spin_count_div_256;
   cs->header.signal_state = 0;
+  cs->header.wait_list.flink_ptr = 0;
+  cs->header.wait_list.blink_ptr = 0;
   cs->lock_count = -1;
   cs->recursion_count = 0;
   cs->owning_thread = 0;
@@ -592,11 +610,34 @@ static void CriticalSectionPrefetchW(const void* vp) {
 #endif
 }
 
+static bool MaybeRepairZeroInitializedCriticalSection(
+    pointer_t<X_RTL_CRITICAL_SECTION> cs, const char* op_name) {
+  if (cs->header.type != 0 || cs->header.absolute != 0 ||
+      uint32_t(cs->header.signal_state) != 0 || cs->lock_count != 0 ||
+      int32_t(cs->recursion_count) != 0 || uint32_t(cs->owning_thread) != 0) {
+    return false;
+  }
+
+  static std::atomic<uint64_t> repair_log_count{0};
+  uint64_t repair_count = ++repair_log_count;
+  if (repair_count <= 32 || (repair_count % 128) == 0) {
+    XELOGW(
+        "Rtl{}CriticalSection repairing zero-initialized cs={:08X} "
+        "wait_list={:08X}/{:08X}",
+        op_name, cs.guest_address(), uint32_t(cs->header.wait_list.flink_ptr),
+        uint32_t(cs->header.wait_list.blink_ptr));
+  }
+
+  xeRtlInitializeCriticalSection(cs, cs.guest_address());
+  return true;
+}
+
 void RtlEnterCriticalSection_entry(pointer_t<X_RTL_CRITICAL_SECTION> cs) {
   if (!cs.guest_address()) {
     XELOGE("Null critical section in RtlEnterCriticalSection!");
     return;
   }
+  MaybeRepairZeroInitializedCriticalSection(cs, "Enter");
   CriticalSectionPrefetchW(&cs->lock_count);
   uint32_t cur_thread = XThread::GetCurrentThread()->guest_object();
   uint32_t spin_count = cs->header.absolute * 256;
@@ -619,9 +660,31 @@ void RtlEnterCriticalSection_entry(pointer_t<X_RTL_CRITICAL_SECTION> cs) {
   }
 
   if (xe::atomic_inc(&cs->lock_count) != 0) {
+    static std::atomic<uint64_t> cs_wait_log_count{0};
+    uint64_t wait_count = ++cs_wait_log_count;
+    if (wait_count <= 32 || (wait_count % 128) == 0) {
+      XELOGI(
+          "RtlEnterCriticalSection wait #{} cs={:08X} cur={:08X} owner={:08X} "
+          "lock_count={} recursion={} spin_count={} type={} signal={} "
+          "wait_list={:08X}/{:08X}",
+          wait_count, cs.guest_address(), cur_thread,
+          uint32_t(cs->owning_thread), cs->lock_count,
+          int32_t(cs->recursion_count), spin_count, cs->header.type,
+          uint32_t(cs->header.signal_state),
+          uint32_t(cs->header.wait_list.flink_ptr),
+          uint32_t(cs->header.wait_list.blink_ptr));
+    }
     // Create a full waiter.
-    xeKeWaitForSingleObject(reinterpret_cast<void*>(cs.host_address()), 8, 0, 0,
-                            nullptr);
+    uint32_t wait_status = xeKeWaitForSingleObject(
+        reinterpret_cast<void*>(cs.host_address()), 8, 0, 0, nullptr);
+    if (wait_count <= 32 || (wait_count % 128) == 0) {
+      XELOGI(
+          "RtlEnterCriticalSection resume #{} cs={:08X} status={:08X} "
+          "owner={:08X} lock_count={} recursion={}",
+          wait_count, cs.guest_address(), wait_status,
+          uint32_t(cs->owning_thread), cs->lock_count,
+          int32_t(cs->recursion_count));
+    }
   }
 
   assert_true(cs->owning_thread == 0);
@@ -637,6 +700,7 @@ dword_result_t RtlTryEnterCriticalSection_entry(
     XELOGE("Null critical section in RtlTryEnterCriticalSection!");
     return 1;  // pretend we got the critical section.
   }
+  MaybeRepairZeroInitializedCriticalSection(cs, "TryEnter");
   CriticalSectionPrefetchW(&cs->lock_count);
   uint32_t thread = XThread::GetCurrentThread()->guest_object();
 
@@ -677,6 +741,15 @@ void RtlLeaveCriticalSection_entry(pointer_t<X_RTL_CRITICAL_SECTION> cs) {
   // Not owned - unlock!
   cs->owning_thread = 0;
   if (xe::atomic_dec(&cs->lock_count) != -1) {
+    static std::atomic<uint64_t> cs_wake_log_count{0};
+    uint64_t wake_count = ++cs_wake_log_count;
+    if (wake_count <= 32 || (wake_count % 128) == 0) {
+      XELOGI(
+          "RtlLeaveCriticalSection wake #{} cs={:08X} next_lock_count={} "
+          "thread={:08X}",
+          wake_count, cs.guest_address(), cs->lock_count,
+          XThread::GetCurrentThread()->guest_object());
+    }
     // There were waiters - wake one of them.
     xeKeSetEvent(reinterpret_cast<X_KEVENT*>(cs.host_address()), 1, 0);
   }

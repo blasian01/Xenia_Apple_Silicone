@@ -304,8 +304,8 @@ class PosixConditionBase {
             static_cast<pthread_mutex_t*>(handles[i]->mutex_.native_handle());
         int result = pthread_mutex_trylock(native_mutex);
 
-        if (result == 0 || result == EBUSY) {
-          // Successfully acquired lock
+        if (result == 0) {
+          // Successfully acquired lock.
           locks.emplace_back(handles[i]->mutex_, std::adopt_lock);
 #if !XE_PLATFORM_MAC
         } else if (result == EOWNERDEAD) {
@@ -314,7 +314,7 @@ class PosixConditionBase {
           locks.emplace_back(handles[i]->mutex_, std::adopt_lock);
 #endif
         } else {
-          // Couldn't acquire lock
+          // Couldn't acquire lock.
           all_locked = false;
           break;
         }
