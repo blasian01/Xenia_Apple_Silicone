@@ -527,14 +527,25 @@ bool A64Backend::ExceptionCallback(Exception* ex) {
           reinterpret_cast<ppc::PPCContext*>(thread_context->x[19]);
       if (guest_context) {
         XELOGE(
-            "ARM64: guest ctx r1={:08X} r3={:08X} r13={:08X} lr={:08X} "
-            "ctr={:08X} cr0={:02X}{:02X}{:02X}{:02X}",
+            "ARM64: guest ctx r1={:08X} r3={:08X} r4={:08X} r5={:08X} "
+            "r7={:08X} r11={:08X} r12={:08X} r13={:08X} "
+            "r25={:08X} r26={:08X} r27={:08X} r28={:08X} r29={:08X} "
+            "r30={:08X} r31={:08X} lr={:08X} ctr={:08X} "
+            "cr0={:02X}{:02X}{:02X}{:02X}",
             uint32_t(guest_context->r[1]), uint32_t(guest_context->r[3]),
-            uint32_t(guest_context->r[13]), uint32_t(guest_context->lr),
+            uint32_t(guest_context->r[4]), uint32_t(guest_context->r[5]),
+            uint32_t(guest_context->r[7]), uint32_t(guest_context->r[11]),
+            uint32_t(guest_context->r[12]), uint32_t(guest_context->r[13]),
+            uint32_t(guest_context->r[25]), uint32_t(guest_context->r[26]),
+            uint32_t(guest_context->r[27]), uint32_t(guest_context->r[28]),
+            uint32_t(guest_context->r[29]), uint32_t(guest_context->r[30]),
+            uint32_t(guest_context->r[31]), uint32_t(guest_context->lr),
             uint32_t(guest_context->ctr), uint8_t(guest_context->cr0.cr0_lt),
             uint8_t(guest_context->cr0.cr0_gt),
             uint8_t(guest_context->cr0.cr0_eq),
             uint8_t(guest_context->cr0.cr0_so));
+        LogGuestInstructionRange(guest_context->thread_state,
+                                 uint32_t(guest_context->lr), 8, 8);
       }
     }
     if (code_cache_) {
@@ -557,6 +568,13 @@ bool A64Backend::ExceptionCallback(Exception* ex) {
               XELOGE("ARM64: guest opcode {:08X} {}", guest_code,
                      disasm.buffer());
             }
+          }
+          if (auto* guest_context = ex->thread_context()
+                                        ? reinterpret_cast<ppc::PPCContext*>(
+                                              ex->thread_context()->x[19])
+                                        : nullptr) {
+            LogGuestInstructionRange(guest_context->thread_state,
+                                     source_entry->guest_address, 8, 8);
           }
         }
       }

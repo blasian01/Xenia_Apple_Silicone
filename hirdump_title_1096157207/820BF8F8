@@ -1,0 +1,40 @@
+<entry>:
+label0:
+  v0.i64<gpr0> = load_context +64
+  v2.i32<gpr0> = load_offset v0.i64<gpr0>, 292C
+  v3.i32<gpr0> = byte_swap v2.i32<gpr0>
+  v4.i64<gpr0> = zero_extend v3.i32<gpr0>
+  store_context +128, v4.i64<gpr0>
+  v5.i64<gpr0> = load_context +72
+  v7.i64<gpr0> = shl v5.i64<gpr0>, 14
+  v9.i64<gpr0> = and v7.i64<gpr0>, FFFFFFFF
+  store_context +120, v9.i64<gpr0>
+  v10.i64<gpr0> = load_context +128
+  v12.i64<gpr0> = and v10.i64<gpr0>, FFFFFFFF
+  v14.i64<gpr1> = shl v12.i64<gpr0>, 20
+  v15.i64<gpr0> = or v14.i64<gpr1>, v12.i64<gpr0>
+  v17.i64<gpr0> = and v15.i64<gpr0>, -F00001
+  store_context +128, v17.i64<gpr0>
+  v18.i64<gpr0> = load_context +128
+  v19.i64<gpr1> = load_context +120
+  v20.i64<gpr0> = or v18.i64<gpr0>, v19.i64<gpr1>
+  store_context +128, v20.i64<gpr0>
+  v21.i64<gpr0> = load_context +64
+  v23.i64<gpr1> = load_context +128
+  v24.i32<gpr1> = truncate v23.i64<gpr1>
+  v25.i32<gpr1> = byte_swap v24.i32<gpr1>
+  store_offset v21.i64<gpr0>, 292C, v25.i32<gpr1>
+  v26.i64<gpr0> = load_context +64
+  v28.i64<gpr0> = load_offset v26.i64<gpr0>, 10
+  v29.i64<gpr0> = byte_swap v28.i64<gpr0>
+  store_context +128, v29.i64<gpr0>
+  v30.i64<gpr0> = load_context +128
+  v32.i64<gpr0> = or v30.i64<gpr0>, 2000
+  store_context +128, v32.i64<gpr0>
+  v33.i64<gpr0> = load_context +64
+  v35.i64<gpr1> = load_context +128
+  v36.i64<gpr1> = byte_swap v35.i64<gpr1>
+  store_offset v33.i64<gpr0>, 10, v36.i64<gpr1>
+  context_barrier
+  v37.i64<gpr0> = load_context +304
+  call_indirect.6 v37.i64<gpr0>

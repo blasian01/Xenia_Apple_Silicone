@@ -1,0 +1,43 @@
+<entry>:
+label0:
+  ; out: label1, dom:0, uncond:1
+  v0.i64<gpr0> = load_context +80
+  store_context +88, v0.i64<gpr0>
+  v1.i64<gpr0> = load_context +64
+  store_context +128, v1.i64<gpr0>
+label1:
+  ; in: label1, dom:0, uncond:0
+  ; in: label0, dom:0, uncond:1
+  ; out: label1, dom:0, uncond:0
+  v2.i64<gpr0> = load_context +128
+  v4.i8<gpr0> = load_offset v2.i64<gpr0>, 0
+  v5.i64<gpr0> = zero_extend v4.i8<gpr0>
+  store_context +120, v5.i64<gpr0>
+  v7.i64<gpr0> = load_context +128
+  v8.i64<gpr0> = add v7.i64<gpr0>, 1
+  store_context +128, v8.i64<gpr0>
+  v9.i64<gpr0> = load_context +120
+  v10.i32<gpr0> = truncate v9.i64<gpr0>
+  store_context +24, 0
+  v13.i8<gpr1> = compare_ne v10.i32<gpr0>, 0
+  store_context +25, v13.i8<gpr1>
+  v14.i8<gpr0> = compare_eq v10.i32<gpr0>, 0
+  store_context +26, v14.i8<gpr0>
+  context_barrier
+  v15.i8<gpr0> = load_context +26
+  branch_false v15.i8<gpr0>, label1
+  v17.i64<gpr0> = load_context +128
+  v18.i64<gpr1> = load_context +64
+  v19.i64<gpr0> = sub v17.i64<gpr0>, v18.i64<gpr1>
+  store_context +128, v19.i64<gpr0>
+  v21.i64<gpr0> = load_context +128
+  v22.i64<gpr0> = sub v21.i64<gpr0>, 1
+  store_context +128, v22.i64<gpr0>
+  v23.i64<gpr0> = load_context +128
+  v25.i64<gpr0> = and v23.i64<gpr0>, FFFFFFFF
+  store_context +128, v25.i64<gpr0>
+  v27.i64<gpr0> = load_context +128
+  v28.i64<gpr0> = add v27.i64<gpr0>, 1
+  store_context +80, v28.i64<gpr0>
+  context_barrier
+  call.2 <fn>

@@ -1,0 +1,93 @@
+<entry>:
+label0:
+  store_context +104, -7CBB0000
+  store_context +96, -7DD80000
+  store_context +88, -7DFF0000
+  store_context +80, -7CBAD420
+  store_context +64, -7DFF29D4
+  store_context +72, -7DD7A000
+  context_barrier
+  set_return_address 82286798
+  store_context +304, 82286798
+  call <fn>
+  store_context +80, -7CBAD434
+  store_context +64, -7DFCC390
+  store_context +72, -7DD79D48
+  context_barrier
+  set_return_address 822867B4
+  store_context +304, 822867B4
+  call <fn>
+  store_context +128, -7CBB0000
+  store_context +120, -7DD80000
+  store_context +112, -7DFD0000
+  store_context +80, -7CBAD448
+  store_context +64, -7DFCC39C
+  store_context +72, -7DD79A90
+  context_barrier
+  set_return_address 822867D0
+  store_context +304, 822867D0
+  call <fn>
+  store_context +104, -7CBB0000
+  store_context +96, -7DD80000
+  store_context +88, -7DFD0000
+  store_context +80, -7CBAD45C
+  store_context +64, -7DFCC3A8
+  store_context +72, -7DD7A990
+  context_barrier
+  set_return_address 822867EC
+  store_context +304, 822867EC
+  call <fn>
+  store_context +80, -7CBAD470
+  store_context +64, -7DFCC3B4
+  store_context +72, -7DD7A878
+  context_barrier
+  set_return_address 82286808
+  store_context +304, 82286808
+  call <fn>
+  store_context +128, -7CBB0000
+  store_context +120, -7DD80000
+  store_context +112, -7DFD0000
+  store_context +80, -7CBAD484
+  store_context +64, -7DFCC3C0
+  store_context +72, -7DD7A6C8
+  context_barrier
+  set_return_address 82286824
+  store_context +304, 82286824
+  call <fn>
+  store_context +104, -7CBB0000
+  store_context +96, -7DD80000
+  store_context +88, -7DFD0000
+  store_context +80, -7CBAD498
+  store_context +64, -7DFCC3CC
+  store_context +72, -7DD7A4C8
+  context_barrier
+  set_return_address 82286840
+  store_context +304, 82286840
+  call <fn>
+  store_context +80, -7CBAD4AC
+  store_context +72, -7DD7A270
+  store_context +64, -7DFCC3DC
+  context_barrier
+  set_return_address 8228685C
+  store_context +304, 8228685C
+  call <fn>
+  store_context +128, -7CBB0000
+  store_context +120, -7DD80000
+  store_context +112, -7DFD0000
+  store_context +80, -7CBAD4C0
+  store_context +64, -7DFCC3EC
+  store_context +72, -7DD79C70
+  context_barrier
+  set_return_address 82286878
+  store_context +304, 82286878
+  call <fn>
+  v127.i64<gpr0> = load_context +48
+  v128.i64<gpr0> = add v127.i64<gpr0>, 60
+  store_context +48, v128.i64<gpr0>
+  v131.i32<gpr0> = load_offset v128.i64<gpr0>, -8
+  v132.i32<gpr0> = byte_swap v131.i32<gpr0>
+  v133.i64<gpr0> = zero_extend v132.i32<gpr0>
+  store_context +136, v133.i64<gpr0>
+  store_context +304, v133.i64<gpr0>
+  context_barrier
+  call_indirect.6 v133.i64<gpr0>

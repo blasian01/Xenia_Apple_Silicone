@@ -1,0 +1,29 @@
+<entry>:
+label0:
+  store_context +128, 9
+  v1.i64<gpr0> = load_context +288
+  store_offset v1.i64<gpr0>, 0, 9000000
+  context_barrier
+  set_return_address 8230DB84
+  store_context +304, 8230DB84
+  call <fn>
+  v8.i64<gpr0> = load_context +288
+  store_context +64, v8.i64<gpr0>
+  store_context +72, 3E8
+  context_barrier
+  set_return_address 8230DB90
+  store_context +304, 8230DB90
+  call XamLoaderSetLaunchData
+  v13.i64<gpr0> = load_context +48
+  v14.i64<gpr0> = add v13.i64<gpr0>, 60
+  store_context +48, v14.i64<gpr0>
+  v17.i32<gpr1> = load_offset v14.i64<gpr0>, -8
+  v18.i32<gpr1> = byte_swap v17.i32<gpr1>
+  v19.i64<gpr1> = zero_extend v18.i32<gpr1>
+  store_context +136, v19.i64<gpr1>
+  store_context +304, v19.i64<gpr1>
+  v23.i64<gpr0> = load_offset v14.i64<gpr0>, -10
+  v24.i64<gpr0> = byte_swap v23.i64<gpr0>
+  store_context +288, v24.i64<gpr0>
+  context_barrier
+  call_indirect.6 v19.i64<gpr1>

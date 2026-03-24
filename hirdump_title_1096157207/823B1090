@@ -1,0 +1,122 @@
+<entry>:
+label0:
+  ; out: label2, dom:0, uncond:1
+  v0.i64<gpr0> = load_context +304
+  store_context +136, v0.i64<gpr0>
+  context_barrier
+  set_return_address 823B1098
+  store_context +304, 823B1098
+  call __savegprlr_26
+  v3.i64<gpr0> = load_context +48
+  v5.i64<gpr0> = sub v3.i64<gpr0>, 90
+  v6.i64<gpr1> = load_context +48
+  v7.i32<gpr1> = truncate v6.i64<gpr1>
+  v8.i32<gpr1> = byte_swap v7.i32<gpr1>
+  store v5.i64<gpr0>, v8.i32<gpr1>
+  store_context +48, v5.i64<gpr0>
+  store_context +128, -7C200000
+  store_context +264, 0
+  v12.i64<gpr0> = load_context +128
+  v13.i64<gpr0> = sub v12.i64<gpr0>, 21F0
+  store_context +256, v13.i64<gpr0>
+  store_context +128, -7DFA0000
+  v16.i64<gpr0> = load_context +256
+  v17.i64<gpr0> = add v16.i64<gpr0>, 8
+  store_context +288, v17.i64<gpr0>
+  store_context +272, 480000
+  v20.i64<gpr0> = load_context +128
+  v21.i64<gpr0> = sub v20.i64<gpr0>, 472C
+  store_context +248, v21.i64<gpr0>
+label2:
+  ; in: label0, dom:0, uncond:1
+  ; in: label1, dom:0, uncond:0
+  ; out: label1, dom:0, uncond:0
+  ; out: label1, dom:0, uncond:1
+  v22.i64<gpr0> = load_context +288
+  v24.i64<gpr1> = load_context +264
+  v25.i32<gpr1> = truncate v24.i64<gpr1>
+  v26.i32<gpr1> = byte_swap v25.i32<gpr1>
+  store_offset v22.i64<gpr0>, -8, v26.i32<gpr1>
+  store_context +80, 404
+  v28.i64<gpr0> = load_context +288
+  v30.i64<gpr1> = load_context +272
+  v31.i32<gpr1> = truncate v30.i64<gpr1>
+  v32.i32<gpr1> = byte_swap v31.i32<gpr1>
+  store_offset v28.i64<gpr0>, -4, v32.i32<gpr1>
+  store_context +72, 4
+  store_context +64, 480000
+  context_barrier
+  set_return_address 823B10D0
+  store_context +304, 823B10D0
+  call <fn>
+  v37.i64<gpr0> = load_context +64
+  store_context +280, v37.i64<gpr0>
+  v38.i64<gpr0> = load_context +64
+  v39.i32<gpr0> = truncate v38.i64<gpr0>
+  store_context +24, 0
+  v42.i8<gpr1> = compare_ne v39.i32<gpr0>, 0
+  store_context +25, v42.i8<gpr1>
+  v43.i8<gpr0> = compare_eq v39.i32<gpr0>, 0
+  store_context +26, v43.i8<gpr0>
+  context_barrier
+  v44.i8<gpr0> = load_context +26
+  branch_false v44.i8<gpr0>, label1
+  v46.i64<gpr0> = load_context +248
+  store_context +72, v46.i64<gpr0>
+  store_context +80, 480000
+  store_context +64, 1
+  context_barrier
+  set_return_address 823B10EC
+  store_context +304, 823B10EC
+  call <fn>
+label1:
+  ; in: label2, dom:0, uncond:0
+  ; in: label2, dom:0, uncond:1
+  ; out: label2, dom:0, uncond:0
+  v51.i64<gpr0> = load_context +288
+  store_context +96, v51.i64<gpr0>
+  store_context +88, 0
+  store_context +80, 0
+  store_context +72, 0
+  store_context +64, 480000
+  context_barrier
+  set_return_address 823B1104
+  store_context +304, 823B1104
+  call <fn>
+  v58.i64<gpr0> = load_context +280
+  store_context +72, v58.i64<gpr0>
+  v59.i64<gpr0> = load_context +288
+  store_context +64, v59.i64<gpr0>
+  context_barrier
+  set_return_address 823B1110
+  store_context +304, 823B1110
+  call <fn>
+  v62.i64<gpr0> = load_context +288
+  v64.i64<gpr1> = load_context +280
+  v65.i32<gpr1> = truncate v64.i64<gpr1>
+  v66.i32<gpr1> = byte_swap v65.i32<gpr1>
+  store_offset v62.i64<gpr0>, 20, v66.i32<gpr1>
+  v68.i64<gpr0> = load_context +288
+  v69.i64<gpr0> = add v68.i64<gpr0>, 2C
+  store_context +288, v69.i64<gpr0>
+  v71.i64<gpr0> = load_context +256
+  v72.i64<gpr0> = add v71.i64<gpr0>, 60
+  store_context +128, v72.i64<gpr0>
+  v73.i64<gpr0> = load_context +288
+  v74.i32<gpr0> = truncate v73.i64<gpr0>
+  v75.i64<gpr1> = load_context +128
+  v76.i32<gpr1> = truncate v75.i64<gpr1>
+  v77.i8<gpr2> = compare_slt v74.i32<gpr0>, v76.i32<gpr1>
+  store_context +24, v77.i8<gpr2>
+  v78.i8<gpr2> = compare_sgt v74.i32<gpr0>, v76.i32<gpr1>
+  store_context +25, v78.i8<gpr2>
+  v79.i8<gpr0> = compare_eq v74.i32<gpr0>, v76.i32<gpr1>
+  store_context +26, v79.i8<gpr0>
+  context_barrier
+  v80.i8<gpr0> = load_context +26
+  branch_false v80.i8<gpr0>, label2
+  v83.i64<gpr0> = load_context +48
+  v84.i64<gpr0> = add v83.i64<gpr0>, 90
+  store_context +48, v84.i64<gpr0>
+  context_barrier
+  call.2 __restgprlr_26

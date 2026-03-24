@@ -77,6 +77,7 @@ class A64Emitter {
 
   FunctionDebugInfo* debug_info() const { return debug_info_; }
   size_t stack_size() const { return stack_size_; }
+  uint32_t current_guest_function() const { return current_guest_function_; }
 
   // Mark source offset for debug
   void MarkSourceOffset(const hir::Instr* i);
@@ -98,6 +99,7 @@ class A64Emitter {
   FunctionDebugInfo* debug_info_ = nullptr;
   uint32_t debug_info_flags_ = 0;
   Arena source_map_arena_;
+  std::vector<SourceMapEntry> source_map_entries_;
   size_t stack_size_ = 0;
   uint32_t current_guest_function_ = 0;
 

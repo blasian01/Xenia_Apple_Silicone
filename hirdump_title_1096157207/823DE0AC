@@ -1,0 +1,208 @@
+<entry>:
+label0:
+  ; out: label1, dom:0, uncond:0
+  ; out: label2, dom:0, uncond:1
+  v0.i64<gpr0> = load_context +88
+  v2.i64<gpr0> = and v0.i64<gpr0>, 3
+  store_context +40, v2.i64<gpr0>
+  v3.i32<gpr0> = truncate v2.i64<gpr0>
+  store_context +0, 0
+  v6.i8<gpr1> = compare_ne v3.i32<gpr0>, 0
+  store_context +1, v6.i8<gpr1>
+  v7.i8<gpr0> = compare_eq v3.i32<gpr0>, 0
+  store_context +2, v7.i8<gpr0>
+  context_barrier
+  v8.i64<gpr0> = load_context +296
+  v10.i64<gpr0> = sub v8.i64<gpr0>, 1
+  store_context +296, v10.i64<gpr0>
+  v11.i32<gpr0> = truncate v10.i64<gpr0>
+  v13.i8<gpr0> = compare_ne v11.i32<gpr0>, 0
+  v14.i8<gpr1> = load_context +2
+  v16.i8<gpr1> = compare_eq v14.i8<gpr1>, 0
+  v17.i8<gpr0> = and v13.i8<gpr0>, v16.i8<gpr1>
+  call_true.2 v17.i8<gpr0>, <fn>
+  v19.i64<gpr0> = load_context +72
+  v21.i64<gpr1> = shl v19.i64<gpr0>, 20
+  v22.i32<gpr0> = truncate v19.i64<gpr0>
+  v23.i64<gpr0> = zero_extend v22.i32<gpr0>
+  v24.i64<gpr0> = or v21.i64<gpr1>, v23.i64<gpr0>
+  v26.i64<gpr0> = rotate_left v24.i64<gpr0>, 8
+  v28.i64<gpr0> = and v26.i64<gpr0>, FF00
+  v29.i64<gpr1> = load_context +72
+  v31.i64<gpr1> = and v29.i64<gpr1>, -FF01
+  v32.i64<gpr0> = or v28.i64<gpr0>, v31.i64<gpr1>
+  store_context +72, v32.i64<gpr0>
+  v33.i64<gpr0> = load_context +80
+  v35.i64<gpr0> = and v33.i64<gpr0>, FFFFFFFF
+  v42.i64<gpr0> = shr v35.i64<gpr0>, 4
+  store_context +40, v42.i64<gpr0>
+  v43.i32<gpr0> = truncate v42.i64<gpr0>
+  store_context +0, 0
+  v46.i8<gpr1> = compare_ne v43.i32<gpr0>, 0
+  store_context +1, v46.i8<gpr1>
+  v47.i8<gpr0> = compare_eq v43.i32<gpr0>, 0
+  store_context +2, v47.i8<gpr0>
+  v48.i64<gpr0> = load_context +72
+  v50.i64<gpr1> = shl v48.i64<gpr0>, 20
+  v51.i32<gpr0> = truncate v48.i64<gpr0>
+  v52.i64<gpr0> = zero_extend v51.i32<gpr0>
+  v53.i64<gpr0> = or v50.i64<gpr1>, v52.i64<gpr0>
+  v55.i64<gpr0> = rotate_left v53.i64<gpr0>, 10
+  v57.i64<gpr0> = and v55.i64<gpr0>, FFFF0000
+  v58.i64<gpr1> = load_context +72
+  v60.i64<gpr1> = and v58.i64<gpr1>, -FFFF0001
+  v61.i64<gpr0> = or v57.i64<gpr0>, v60.i64<gpr1>
+  store_context +72, v61.i64<gpr0>
+  context_barrier
+  v62.i8<gpr0> = load_context +2
+  branch_true v62.i8<gpr0>, label1
+  v64.i64<gpr0> = load_context +40
+  store_context +296, v64.i64<gpr0>
+label2:
+  ; in: label0, dom:0, uncond:1
+  ; in: label2, dom:0, uncond:0
+  ; out: label2, dom:0, uncond:0
+  ; out: label1, dom:0, uncond:1
+  v65.i64<gpr0> = load_context +88
+  v67.i64<gpr1> = load_context +72
+  v68.i32<gpr1> = truncate v67.i64<gpr1>
+  v69.i32<gpr1> = byte_swap v68.i32<gpr1>
+  store_offset v65.i64<gpr0>, 0, v69.i32<gpr1>
+  v70.i64<gpr0> = load_context +88
+  v72.i64<gpr1> = load_context +72
+  v73.i32<gpr1> = truncate v72.i64<gpr1>
+  v74.i32<gpr1> = byte_swap v73.i32<gpr1>
+  store_offset v70.i64<gpr0>, 4, v74.i32<gpr1>
+  v75.i64<gpr0> = load_context +88
+  v77.i64<gpr1> = load_context +72
+  v78.i32<gpr1> = truncate v77.i64<gpr1>
+  v79.i32<gpr1> = byte_swap v78.i32<gpr1>
+  store_offset v75.i64<gpr0>, 8, v79.i32<gpr1>
+  v80.i64<gpr0> = load_context +88
+  v82.i64<gpr1> = load_context +72
+  v83.i32<gpr1> = truncate v82.i64<gpr1>
+  v84.i32<gpr1> = byte_swap v83.i32<gpr1>
+  store_offset v80.i64<gpr0>, C, v84.i32<gpr1>
+  v86.i64<gpr0> = load_context +88
+  v87.i64<gpr0> = add v86.i64<gpr0>, 10
+  store_context +88, v87.i64<gpr0>
+  context_barrier
+  v88.i64<gpr0> = load_context +296
+  v90.i64<gpr0> = sub v88.i64<gpr0>, 1
+  store_context +296, v90.i64<gpr0>
+  v91.i32<gpr0> = truncate v90.i64<gpr0>
+  v93.i8<gpr0> = compare_ne v91.i32<gpr0>, 0
+  branch_true v93.i8<gpr0>, label2
+label1:
+  ; in: label0, dom:0, uncond:0
+  ; in: label2, dom:0, uncond:1
+  ; out: label3, dom:0, uncond:0
+  ; out: label3, dom:0, uncond:1
+  ; out: label3, dom:0, uncond:0
+  ; out: label3, dom:0, uncond:0
+  v95.i64<gpr0> = load_context +80
+  v97.i64<gpr0> = and v95.i64<gpr0>, FFFFFFFF
+  v193.i64<gpr0> = shr v97.i64<gpr0>, 2
+  v104.i64<gpr0> = and v193.i64<gpr0>, 3
+  store_context +40, v104.i64<gpr0>
+  v105.i32<gpr0> = truncate v104.i64<gpr0>
+  store_context +0, 0
+  v108.i8<gpr1> = compare_ne v105.i32<gpr0>, 0
+  store_context +1, v108.i8<gpr1>
+  v109.i8<gpr0> = compare_eq v105.i32<gpr0>, 0
+  store_context +2, v109.i8<gpr0>
+  context_barrier
+  v110.i8<gpr0> = load_context +2
+  branch_true v110.i8<gpr0>, label3
+  v112.i64<gpr0> = load_context +40
+  store_context +296, v112.i64<gpr0>
+  v113.i64<gpr0> = load_context +88
+  v115.i64<gpr1> = load_context +72
+  v116.i32<gpr1> = truncate v115.i64<gpr1>
+  v117.i32<gpr1> = byte_swap v116.i32<gpr1>
+  store_offset v113.i64<gpr0>, 0, v117.i32<gpr1>
+  v119.i64<gpr0> = load_context +88
+  v120.i64<gpr0> = add v119.i64<gpr0>, 4
+  store_context +88, v120.i64<gpr0>
+  context_barrier
+  v121.i64<gpr0> = load_context +296
+  v123.i64<gpr0> = sub v121.i64<gpr0>, 1
+  store_context +296, v123.i64<gpr0>
+  v124.i32<gpr0> = truncate v123.i64<gpr0>
+  v126.i8<gpr0> = compare_eq v124.i32<gpr0>, 0
+  branch_true v126.i8<gpr0>, label3
+  v128.i64<gpr0> = load_context +88
+  v130.i64<gpr1> = load_context +72
+  v131.i32<gpr1> = truncate v130.i64<gpr1>
+  v132.i32<gpr1> = byte_swap v131.i32<gpr1>
+  store_offset v128.i64<gpr0>, 0, v132.i32<gpr1>
+  v134.i64<gpr0> = load_context +88
+  v135.i64<gpr0> = add v134.i64<gpr0>, 4
+  store_context +88, v135.i64<gpr0>
+  context_barrier
+  v136.i64<gpr0> = load_context +296
+  v138.i64<gpr0> = sub v136.i64<gpr0>, 1
+  store_context +296, v138.i64<gpr0>
+  v139.i32<gpr0> = truncate v138.i64<gpr0>
+  v141.i8<gpr0> = compare_eq v139.i32<gpr0>, 0
+  branch_true v141.i8<gpr0>, label3
+  v143.i64<gpr0> = load_context +88
+  v145.i64<gpr1> = load_context +72
+  v146.i32<gpr1> = truncate v145.i64<gpr1>
+  v147.i32<gpr1> = byte_swap v146.i32<gpr1>
+  store_offset v143.i64<gpr0>, 0, v147.i32<gpr1>
+  v149.i64<gpr0> = load_context +88
+  v150.i64<gpr0> = add v149.i64<gpr0>, 4
+  store_context +88, v150.i64<gpr0>
+label3:
+  ; in: label1, dom:0, uncond:0
+  ; in: label1, dom:0, uncond:1
+  ; in: label1, dom:0, uncond:0
+  ; in: label1, dom:0, uncond:0
+  v151.i64<gpr0> = load_context +80
+  v153.i64<gpr0> = and v151.i64<gpr0>, 3
+  store_context +40, v153.i64<gpr0>
+  v154.i32<gpr0> = truncate v153.i64<gpr0>
+  store_context +0, 0
+  v157.i8<gpr1> = compare_ne v154.i32<gpr0>, 0
+  store_context +1, v157.i8<gpr1>
+  v158.i8<gpr0> = compare_eq v154.i32<gpr0>, 0
+  store_context +2, v158.i8<gpr0>
+  v159.i64<gpr0> = load_context +40
+  store_context +296, v159.i64<gpr0>
+  context_barrier
+  v160.i8<gpr0> = load_context +2
+  v161.i64<gpr1> = load_context +304
+  call_indirect_true.6 v160.i8<gpr0>, v161.i64<gpr1>
+  v162.i64<gpr0> = load_context +88
+  v164.i64<gpr1> = load_context +72
+  v165.i8<gpr1> = truncate v164.i64<gpr1>
+  store_offset v162.i64<gpr0>, 0, v165.i8<gpr1>
+  context_barrier
+  v166.i64<gpr0> = load_context +296
+  v168.i64<gpr0> = sub v166.i64<gpr0>, 1
+  store_context +296, v168.i64<gpr0>
+  v169.i32<gpr0> = truncate v168.i64<gpr0>
+  v171.i8<gpr0> = compare_eq v169.i32<gpr0>, 0
+  v172.i64<gpr1> = load_context +304
+  call_indirect_true.6 v171.i8<gpr0>, v172.i64<gpr1>
+  v173.i64<gpr0> = load_context +88
+  v175.i64<gpr1> = load_context +72
+  v176.i8<gpr1> = truncate v175.i64<gpr1>
+  store_offset v173.i64<gpr0>, 1, v176.i8<gpr1>
+  context_barrier
+  v177.i64<gpr0> = load_context +296
+  v179.i64<gpr0> = sub v177.i64<gpr0>, 1
+  store_context +296, v179.i64<gpr0>
+  v180.i32<gpr0> = truncate v179.i64<gpr0>
+  v182.i8<gpr0> = compare_eq v180.i32<gpr0>, 0
+  v183.i64<gpr1> = load_context +304
+  call_indirect_true.6 v182.i8<gpr0>, v183.i64<gpr1>
+  v184.i64<gpr0> = load_context +88
+  v186.i64<gpr1> = load_context +72
+  v187.i8<gpr1> = truncate v186.i64<gpr1>
+  store_offset v184.i64<gpr0>, 2, v187.i8<gpr1>
+  context_barrier
+  v188.i64<gpr0> = load_context +304
+  call_indirect.6 v188.i64<gpr0>
+<block4>:

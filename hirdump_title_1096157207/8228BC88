@@ -1,0 +1,57 @@
+<entry>:
+label0:
+  v0.i64<gpr0> = load_context +304
+  store_context +136, v0.i64<gpr0>
+  v1.i64<gpr0> = load_context +48
+  v3.i64<gpr1> = load_context +136
+  v4.i32<gpr1> = truncate v3.i64<gpr1>
+  v5.i32<gpr1> = byte_swap v4.i32<gpr1>
+  store_offset v1.i64<gpr0>, -8, v5.i32<gpr1>
+  v6.i64<gpr0> = load_context +48
+  v8.i64<gpr0> = sub v6.i64<gpr0>, 60
+  v9.i64<gpr1> = load_context +48
+  v10.i32<gpr1> = truncate v9.i64<gpr1>
+  v11.i32<gpr1> = byte_swap v10.i32<gpr1>
+  store v8.i64<gpr0>, v11.i32<gpr1>
+  store_context +48, v8.i64<gpr0>
+  context_barrier
+  set_return_address 8228BC98
+  store_context +304, 8228BC98
+  call <fn>
+  store_context +128, -7CAF0000
+  v16.i64<gpr0> = load_context +128
+  v17.i64<gpr0> = sub v16.i64<gpr0>, 3EEC
+  store_context +120, v17.i64<gpr0>
+  v18.i64<gpr0> = load_context +120
+  v20.i32<gpr0> = load_offset v18.i64<gpr0>, 1C
+  v21.i32<gpr0> = byte_swap v20.i32<gpr0>
+  v22.i64<gpr0> = zero_extend v21.i32<gpr0>
+  store_context +128, v22.i64<gpr0>
+  v23.i64<gpr0> = load_context +128
+  v24.i64<gpr1> = load_context +64
+  v25.i64<gpr0> = sub v23.i64<gpr0>, v24.i64<gpr1>
+  store_context +112, v25.i64<gpr0>
+  v26.i64<gpr0> = load_context +112
+  v27.i32<gpr0> = truncate v26.i64<gpr0>
+  v28.i8<gpr0> = cntlz v27.i32<gpr0>
+  v29.i64<gpr0> = zero_extend v28.i8<gpr0>
+  store_context +104, v29.i64<gpr0>
+  v30.i64<gpr0> = load_context +104
+  v32.i64<gpr0> = and v30.i64<gpr0>, FFFFFFFF
+  v53.i64<gpr0> = shr v32.i64<gpr0>, 5
+  v39.i64<gpr0> = and v53.i64<gpr0>, 1
+  store_context +64, v39.i64<gpr0>
+  v41.i64<gpr0> = load_context +48
+  v42.i64<gpr0> = add v41.i64<gpr0>, 60
+  store_context +48, v42.i64<gpr0>
+  v43.i64<gpr0> = load_context +48
+  v45.i32<gpr0> = load_offset v43.i64<gpr0>, -8
+  v46.i32<gpr0> = byte_swap v45.i32<gpr0>
+  v47.i64<gpr0> = zero_extend v46.i32<gpr0>
+  store_context +136, v47.i64<gpr0>
+  v48.i64<gpr0> = load_context +136
+  store_context +304, v48.i64<gpr0>
+  context_barrier
+  v49.i64<gpr0> = load_context +304
+  call_indirect.6 v49.i64<gpr0>
+<block1>:

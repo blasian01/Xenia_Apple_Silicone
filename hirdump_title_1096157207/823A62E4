@@ -1,0 +1,39 @@
+<entry>:
+label0:
+  ; out: label1, dom:0, uncond:0
+  ; out: label1, dom:0, uncond:1
+  store_context +64, 0
+  context_barrier
+  set_return_address 823A62EC
+  store_context +304, 823A62EC
+  call <fn>
+  context_barrier
+  set_return_address 823A62F0
+  store_context +304, 823A62F0
+  call <fn>
+  context_barrier
+  set_return_address 823A62F4
+  store_context +304, 823A62F4
+  call <fn>
+  v7.i64<gpr0> = load_context +272
+  v8.i32<gpr0> = truncate v7.i64<gpr0>
+  v10.i8<gpr1> = compare_slt v8.i32<gpr0>, 0
+  store_context +24, v10.i8<gpr1>
+  v11.i8<gpr1> = compare_sgt v8.i32<gpr0>, 0
+  store_context +25, v11.i8<gpr1>
+  v12.i8<gpr0> = compare_eq v8.i32<gpr0>, 0
+  store_context +26, v12.i8<gpr0>
+  context_barrier
+  branch_true v12.i8<gpr0>, label1
+  context_barrier
+  set_return_address 823A6300
+  store_context +304, 823A6300
+  call <fn>
+label1:
+  ; in: label0, dom:0, uncond:0
+  ; in: label0, dom:0, uncond:1
+  v18.i64<gpr0> = load_context +48
+  v19.i64<gpr0> = add v18.i64<gpr0>, 70
+  store_context +48, v19.i64<gpr0>
+  context_barrier
+  call.2 __restgprlr_29

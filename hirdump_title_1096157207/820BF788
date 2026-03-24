@@ -1,0 +1,99 @@
+<entry>:
+label0:
+  ; out: label1, dom:0, uncond:1
+  ; out: label2, dom:1, uncond:0
+  store_context +128, -7DF90000
+  v1.i64<gpr0> = load_context +48
+  v3.i64<gpr1> = load_context +72
+  v4.i32<gpr1> = truncate v3.i64<gpr1>
+  v5.i32<gpr1> = byte_swap v4.i32<gpr1>
+  store_offset v1.i64<gpr0>, 1C, v5.i32<gpr1>
+  v6.i64<gpr0> = load_context +48
+  v8.i64<gpr0> = add v6.i64<gpr0>, 1C
+  v9.i32<gpr0> = load v8.i64<gpr0>
+  v10.i32<gpr0> = byte_swap v9.i32<gpr0>
+  v11.f32<vec0> = cast v10.i32<gpr0>
+  v12.f64<vec0> = convert v11.f32<vec0>
+  store_context +320, v12.f64<vec0>
+  store_context +136, 1
+  v15.i64<gpr0> = load_context +128
+  v16.i64<gpr0> = sub v15.i64<gpr0>, 7C90
+  store_context +128, v16.i64<gpr0>
+  v17.i64<gpr0> = load_context +64
+  v19.i64<gpr0> = add v17.i64<gpr0>, 2E80
+  v20.f64<vec0> = load_context +320
+  v21.f32<vec0> = convert v20.f64<vec0>
+  v22.i32<gpr1> = cast v21.f32<vec0>
+  v23.i32<gpr1> = byte_swap v22.i32<gpr1>
+  store v19.i64<gpr0>, v23.i32<gpr1>
+  v24.i64<gpr0> = load_context +128
+  v26.i64<gpr0> = add v24.i64<gpr0>, 2A8
+  v27.i32<gpr0> = load v26.i64<gpr0>
+  v28.i32<gpr0> = byte_swap v27.i32<gpr0>
+  v29.f32<vec0> = cast v28.i32<gpr0>
+  v30.f64<vec0> = convert v29.f32<vec0>
+  store_context +424, v30.f64<vec0>
+  v31.i64<gpr0> = load_context +136
+  v33.i64<gpr0> = rotate_left v31.i64<gpr0>, 35
+  store_context +136, v33.i64<gpr0>
+  v34.f64<vec0> = load_context +320
+  v35.f64<vec1> = load_context +424
+  v36.f64<vec0> = mul v34.f64<vec0>, v35.f64<vec1>
+  v37.f64<vec0> = to_single v36.f64<vec0>
+  store_context +320, v37.f64<vec0>
+  v57.i32<gpr0> = load_context +32
+  v59.i32<gpr0> = and v57.i32<gpr0>, -60000001
+  store_context +32, v59.i32<gpr0>
+  v61.f64<vec0> = load_context +320
+  v62.i8<gpr0> = is_nan v61.f64<vec0>
+  branch_true v62.i8<gpr0>, label2
+  v63.f64<vec0> = load_context +320
+  v64.i32<gpr0> = convert v63.f64<vec0>
+  v65.i64<gpr0> = sign_extend v64.i32<gpr0>
+  v66.f64<vec0> = cast v65.i64<gpr0>
+  store_context +320, v66.f64<vec0>
+  v86.i32<gpr0> = load_context +32
+  v88.i32<gpr0> = and v86.i32<gpr0>, -60000001
+  store_context +32, v88.i32<gpr0>
+  branch label1
+label2:
+  ; in: label0, dom:1, uncond:0
+  ; out: label1, dom:0, uncond:1
+  store_context +320, 0.000000
+  v111.i32<gpr0> = load_context +32
+  v113.i32<gpr0> = and v111.i32<gpr0>, -60000001
+  store_context +32, v113.i32<gpr0>
+label1:
+  ; in: label0, dom:0, uncond:1
+  ; in: label2, dom:0, uncond:1
+  v115.i64<gpr0> = load_context +48
+  v117.i64<gpr0> = sub v115.i64<gpr0>, 10
+  v118.f64<vec0> = load_context +320
+  v119.i64<gpr1> = cast v118.f64<vec0>
+  v120.i64<gpr1> = byte_swap v119.i64<gpr1>
+  store v117.i64<gpr0>, v120.i64<gpr1>
+  v121.i64<gpr0> = load_context +48
+  v123.i32<gpr0> = load_offset v121.i64<gpr0>, -C
+  v124.i32<gpr0> = byte_swap v123.i32<gpr0>
+  v125.i64<gpr0> = zero_extend v124.i32<gpr0>
+  store_context +128, v125.i64<gpr0>
+  v126.i64<gpr0> = load_context +64
+  v128.i64<gpr1> = load_context +128
+  v129.i16<gpr1> = truncate v128.i64<gpr1>
+  v130.i16<gpr1> = byte_swap v129.i16<gpr1>
+  store_offset v126.i64<gpr0>, 296A, v130.i16<gpr1>
+  v131.i64<gpr0> = load_context +64
+  v133.i64<gpr0> = load_offset v131.i64<gpr0>, 18
+  v134.i64<gpr0> = byte_swap v133.i64<gpr0>
+  store_context +128, v134.i64<gpr0>
+  v135.i64<gpr0> = load_context +128
+  v136.i64<gpr1> = load_context +136
+  v137.i64<gpr0> = or v135.i64<gpr0>, v136.i64<gpr1>
+  store_context +128, v137.i64<gpr0>
+  v138.i64<gpr0> = load_context +64
+  v140.i64<gpr1> = load_context +128
+  v141.i64<gpr1> = byte_swap v140.i64<gpr1>
+  store_offset v138.i64<gpr0>, 18, v141.i64<gpr1>
+  context_barrier
+  v142.i64<gpr0> = load_context +304
+  call_indirect.6 v142.i64<gpr0>

@@ -1,0 +1,42 @@
+<entry>:
+label0:
+  v0.i64<gpr0> = load_context +272
+  v1.i64<gpr1> = load_context +288
+  v2.i64<gpr0> = add v0.i64<gpr0>, v1.i64<gpr1>
+  v5.i8<gpr2> = load_offset v1.i64<gpr1>, 1
+  v6.i64<gpr3> = zero_extend v5.i8<gpr2>
+  store_context +112, v6.i64<gpr3>
+  v7.i64<gpr1> = add v1.i64<gpr1>, 1
+  store_context +288, v7.i64<gpr1>
+  v8.i64<gpr1> = load_context +64
+  v9.i32<gpr1> = truncate v8.i64<gpr1>
+  v10.i64<gpr1> = sign_extend v9.i32<gpr1>
+  v12.i32<gpr0> = truncate v2.i64<gpr0>
+  v13.i64<gpr0> = sign_extend v12.i32<gpr0>
+  v14.i64<gpr0> = mul v10.i64<gpr1>, v13.i64<gpr0>
+  store_context +120, v14.i64<gpr0>
+  v17.i64<gpr1> = sign_extend v5.i8<gpr2>
+  store_context +128, v17.i64<gpr1>
+  v19.i64<gpr2> = load_context +280
+  v20.i64<gpr0> = add v14.i64<gpr0>, v19.i64<gpr2>
+  store_context +280, v20.i64<gpr0>
+  store_context +64, v17.i64<gpr1>
+  v23.i32<gpr0> = truncate v17.i64<gpr1>
+  v25.i8<gpr1> = compare_slt v23.i32<gpr0>, 0
+  store_context +24, v25.i8<gpr1>
+  v26.i8<gpr1> = compare_sgt v23.i32<gpr0>, 0
+  store_context +25, v26.i8<gpr1>
+  v27.i8<gpr1> = compare_eq v23.i32<gpr0>, 0
+  store_context +26, v27.i8<gpr1>
+  context_barrier
+  v40.i8<gpr0> = compare_ne v23.i32<gpr0>, 0
+  call_true.2 v40.i8<gpr0>, <fn>
+  v32.i64<gpr0> = load_context +280
+  v34.i64<gpr0> = and v32.i64<gpr0>, 3FF
+  store_context +64, v34.i64<gpr0>
+  v36.i64<gpr0> = load_context +48
+  v37.i64<gpr0> = add v36.i64<gpr0>, 70
+  store_context +48, v37.i64<gpr0>
+  context_barrier
+  call.2 __restgprlr_29
+<block1>:

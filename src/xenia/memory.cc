@@ -181,13 +181,17 @@ bool Memory::Initialize() {
   mapping_base_ = 0;
   for (size_t n = 32; n < 64; n++) {
     auto mapping_base = reinterpret_cast<uint8_t*>(1ull << n);
+    XELOGI("Memory: Trying mapping base {:p} (1<<{})", (void*)mapping_base, n);
     if (!MapViews(mapping_base)) {
+      XELOGI("Memory: MapViews succeeded at {:p}", (void*)mapping_base);
       mapping_base_ = mapping_base;
       break;
     }
+    XELOGW("Memory: MapViews failed at {:p}", (void*)mapping_base);
   }
   if (!mapping_base_) {
     XELOGE("Unable to find a continuous block in the 64bit address space.");
+    XELOGE("Tried all power-of-two bases from 1<<32 to 1<<63");
     assert_always();
     return false;
   }
@@ -340,6 +344,9 @@ static const struct {
 };
 int Memory::MapViews(uint8_t* mapping_base) {
   assert_true(xe::countof(map_info) == xe::countof(views_.all_views));
+  for (auto& view : views_.all_views) {
+    view = nullptr;
+  }
   // 0xE0000000 4 KB offset is emulated via host_address_offset and on the CPU
   // side if system allocation granularity is bigger than 4 KB.
   uint64_t granularity_mask = ~uint64_t(system_allocation_granularity_ - 1);
@@ -364,6 +371,7 @@ void Memory::UnmapViews() {
       size_t length = map_info[n].virtual_address_end -
                       map_info[n].virtual_address_start + 1;
       xe::memory::UnmapFileView(mapping_, views_.all_views[n], length);
+      views_.all_views[n] = nullptr;
     }
   }
 }

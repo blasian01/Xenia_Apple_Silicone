@@ -1,0 +1,32 @@
+<entry>:
+label0:
+  ; out: label1, dom:0, uncond:1
+  ; out: label1, dom:0, uncond:0
+  v0.i64<gpr0> = load_context +72
+  v1.i32<gpr0> = truncate v0.i64<gpr0>
+  store_context +24, 0
+  v4.i8<gpr1> = compare_ne v1.i32<gpr0>, 0
+  store_context +25, v4.i8<gpr1>
+  v5.i8<gpr0> = compare_eq v1.i32<gpr0>, 0
+  store_context +26, v5.i8<gpr0>
+  context_barrier
+  v6.i8<gpr0> = load_context +26
+  branch_true v6.i8<gpr0>, label1
+  store_context +128, 1
+  store_context +120, 0
+  v10.i64<gpr0> = load_context +72
+  v12.i64<gpr1> = load_context +128
+  v13.i8<gpr1> = truncate v12.i64<gpr1>
+  store_offset v10.i64<gpr0>, 0, v13.i8<gpr1>
+  v14.i64<gpr0> = load_context +72
+  v16.i64<gpr1> = load_context +120
+  v17.i16<gpr1> = truncate v16.i64<gpr1>
+  v18.i16<gpr1> = byte_swap v17.i16<gpr1>
+  store_offset v14.i64<gpr0>, 2, v18.i16<gpr1>
+label1:
+  ; in: label0, dom:0, uncond:1
+  ; in: label0, dom:0, uncond:0
+  store_context +64, 0
+  context_barrier
+  v20.i64<gpr0> = load_context +304
+  call_indirect.6 v20.i64<gpr0>

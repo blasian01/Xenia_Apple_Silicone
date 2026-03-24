@@ -1,0 +1,36 @@
+<entry>:
+label0:
+  ; out: label1, dom:0, uncond:0
+  ; out: label1, dom:0, uncond:1
+  v0.i64<gpr0> = load_context +80
+  v1.i32<gpr0> = truncate v0.i64<gpr0>
+  store_context +24, 0
+  v4.i8<gpr1> = compare_ne v1.i32<gpr0>, 0
+  store_context +25, v4.i8<gpr1>
+  v5.i8<gpr1> = compare_eq v1.i32<gpr0>, 0
+  store_context +26, v5.i8<gpr1>
+  context_barrier
+  v29.i8<gpr0> = compare_ne v1.i32<gpr0>, 0
+  call_true.2 v29.i8<gpr0>, <fn>
+  v10.i64<gpr0> = load_context +272
+  v12.i64<gpr0> = and v10.i64<gpr0>, 10
+  store_context +128, v12.i64<gpr0>
+  v13.i32<gpr0> = truncate v12.i64<gpr0>
+  store_context +0, 0
+  v16.i8<gpr1> = compare_ne v13.i32<gpr0>, 0
+  store_context +1, v16.i8<gpr1>
+  v17.i8<gpr0> = compare_eq v13.i32<gpr0>, 0
+  store_context +2, v17.i8<gpr0>
+  context_barrier
+  branch_false v17.i8<gpr0>, label1
+  v20.i64<gpr0> = load_context +72
+  v22.i64<gpr1> = load_context +96
+  v23.i16<gpr1> = truncate v22.i64<gpr1>
+  v24.i16<gpr1> = byte_swap v23.i16<gpr1>
+  store_offset v20.i64<gpr0>, 2, v24.i16<gpr1>
+label1:
+  ; in: label0, dom:0, uncond:0
+  ; in: label0, dom:0, uncond:1
+  context_barrier
+  call.2 __restgprlr_28
+<block2>:

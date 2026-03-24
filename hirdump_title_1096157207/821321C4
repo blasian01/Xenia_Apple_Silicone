@@ -1,0 +1,21 @@
+<entry>:
+label0:
+  store_context +72, 0
+  v4.i32<gpr0> = load_offset -7CC00000, -24BC
+  v5.i32<gpr0> = byte_swap v4.i32<gpr0>
+  v6.i64<gpr0> = zero_extend v5.i32<gpr0>
+  store_context +64, v6.i64<gpr0>
+  context_barrier
+  set_return_address 821321D4
+  store_context +304, 821321D4
+  call <fn>
+  v10.i64<gpr0> = load_context +48
+  v11.i64<gpr0> = add v10.i64<gpr0>, 80
+  store_context +48, v11.i64<gpr0>
+  v14.i32<gpr0> = load_offset v11.i64<gpr0>, -8
+  v15.i32<gpr0> = byte_swap v14.i32<gpr0>
+  v16.i64<gpr0> = zero_extend v15.i32<gpr0>
+  store_context +136, v16.i64<gpr0>
+  store_context +304, v16.i64<gpr0>
+  context_barrier
+  call_indirect.6 v16.i64<gpr0>

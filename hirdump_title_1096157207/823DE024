@@ -1,0 +1,35 @@
+<entry>:
+label0:
+  v0.i64<gpr0> = load_context +136
+  v2.i64<gpr0> = sub v0.i64<gpr0>, 28
+  v3.f64<vec0> = load_context +536
+  v4.i64<gpr1> = cast v3.f64<vec0>
+  v5.i64<gpr1> = byte_swap v4.i64<gpr1>
+  store v2.i64<gpr0>, v5.i64<gpr1>
+  v6.i64<gpr0> = load_context +136
+  v8.i64<gpr0> = sub v6.i64<gpr0>, 20
+  v9.f64<vec0> = load_context +544
+  v10.i64<gpr1> = cast v9.f64<vec0>
+  v11.i64<gpr1> = byte_swap v10.i64<gpr1>
+  store v8.i64<gpr0>, v11.i64<gpr1>
+  v12.i64<gpr0> = load_context +136
+  v14.i64<gpr0> = sub v12.i64<gpr0>, 18
+  v15.f64<vec0> = load_context +552
+  v16.i64<gpr1> = cast v15.f64<vec0>
+  v17.i64<gpr1> = byte_swap v16.i64<gpr1>
+  store v14.i64<gpr0>, v17.i64<gpr1>
+  v18.i64<gpr0> = load_context +136
+  v20.i64<gpr0> = sub v18.i64<gpr0>, 10
+  v21.f64<vec0> = load_context +560
+  v22.i64<gpr1> = cast v21.f64<vec0>
+  v23.i64<gpr1> = byte_swap v22.i64<gpr1>
+  store v20.i64<gpr0>, v23.i64<gpr1>
+  v24.i64<gpr0> = load_context +136
+  v26.i64<gpr0> = sub v24.i64<gpr0>, 8
+  v27.f64<vec0> = load_context +568
+  v28.i64<gpr1> = cast v27.f64<vec0>
+  v29.i64<gpr1> = byte_swap v28.i64<gpr1>
+  store v26.i64<gpr0>, v29.i64<gpr1>
+  context_barrier
+  v30.i64<gpr0> = load_context +304
+  call_indirect.6 v30.i64<gpr0>

@@ -1,0 +1,72 @@
+<entry>:
+label0:
+  ; out: label1, dom:0, uncond:1
+  ; out: label1, dom:0, uncond:0
+  v0.i64<gpr0> = load_context +304
+  store_context +136, v0.i64<gpr0>
+  context_barrier
+  set_return_address 823A62C0
+  store_context +304, 823A62C0
+  call __savegprlr_29
+  v3.i64<gpr0> = load_context +48
+  v5.i64<gpr0> = sub v3.i64<gpr0>, 70
+  v6.i64<gpr1> = load_context +48
+  v7.i32<gpr1> = truncate v6.i64<gpr1>
+  v8.i32<gpr1> = byte_swap v7.i32<gpr1>
+  store v5.i64<gpr0>, v8.i32<gpr1>
+  store_context +48, v5.i64<gpr0>
+  v9.i64<gpr0> = load_context +64
+  store_context +288, v9.i64<gpr0>
+  v10.i64<gpr0> = load_context +72
+  store_context +280, v10.i64<gpr0>
+  context_barrier
+  set_return_address 823A62D0
+  store_context +304, 823A62D0
+  call <fn>
+  v13.i64<gpr0> = load_context +64
+  store_context +272, v13.i64<gpr0>
+  store_context +80, -200000
+  v15.i64<gpr0> = load_context +280
+  store_context +72, v15.i64<gpr0>
+  v16.i64<gpr0> = load_context +288
+  store_context +64, v16.i64<gpr0>
+  context_barrier
+  set_return_address 823A62E4
+  store_context +304, 823A62E4
+  call <fn>
+  store_context +64, 0
+  context_barrier
+  set_return_address 823A62EC
+  store_context +304, 823A62EC
+  call <fn>
+  context_barrier
+  set_return_address 823A62F0
+  store_context +304, 823A62F0
+  call <fn>
+  context_barrier
+  set_return_address 823A62F4
+  store_context +304, 823A62F4
+  call <fn>
+  v26.i64<gpr0> = load_context +272
+  v27.i32<gpr0> = truncate v26.i64<gpr0>
+  v29.i8<gpr1> = compare_slt v27.i32<gpr0>, 0
+  store_context +24, v29.i8<gpr1>
+  v30.i8<gpr1> = compare_sgt v27.i32<gpr0>, 0
+  store_context +25, v30.i8<gpr1>
+  v31.i8<gpr0> = compare_eq v27.i32<gpr0>, 0
+  store_context +26, v31.i8<gpr0>
+  context_barrier
+  v32.i8<gpr0> = load_context +26
+  branch_true v32.i8<gpr0>, label1
+  context_barrier
+  set_return_address 823A6300
+  store_context +304, 823A6300
+  call <fn>
+label1:
+  ; in: label0, dom:0, uncond:1
+  ; in: label0, dom:0, uncond:0
+  v37.i64<gpr0> = load_context +48
+  v38.i64<gpr0> = add v37.i64<gpr0>, 70
+  store_context +48, v38.i64<gpr0>
+  context_barrier
+  call.2 __restgprlr_29

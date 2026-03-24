@@ -1,0 +1,114 @@
+<entry>:
+label0:
+  ; in: label2, dom:1, uncond:0
+  ; out: label1, dom:1, uncond:0
+  ; out: label2, dom:0, uncond:1
+  ; out: label2, dom:0, uncond:0
+  v0.i64<gpr0> = load_context +272
+  store_context +64, v0.i64<gpr0>
+  store_context +96, 0
+  store_context +88, 0
+  store_context +80, 1
+  store_context +72, 3
+  context_barrier
+  set_return_address 82095870
+  store_context +304, 82095870
+  call KeWaitForSingleObject
+  v7.i64<gpr0> = load_context +288
+  v9.i32<gpr0> = load_offset v7.i64<gpr0>, -1654
+  v10.i32<gpr0> = byte_swap v9.i32<gpr0>
+  v11.i64<gpr0> = zero_extend v10.i32<gpr0>
+  store_context +64, v11.i64<gpr0>
+  v14.i32<gpr0> = load_offset v11.i64<gpr0>, 12C
+  v15.i32<gpr0> = byte_swap v14.i32<gpr0>
+  v19.i8<gpr1> = cntlz v15.i32<gpr0>
+  v20.i64<gpr1> = zero_extend v19.i8<gpr1>
+  store_context +120, v20.i64<gpr1>
+  v103.i8<gpr0> = compare_eq v15.i32<gpr0>, 0
+  v96.i64<gpr0> = zero_extend v103.i8<gpr0>
+  store_context +128, v96.i64<gpr0>
+  store_context +280, v96.i64<gpr0>
+  v33.i32<gpr0> = truncate v96.i64<gpr0>
+  store_context +24, 0
+  v36.i8<gpr1> = truncate v33.i32<gpr0>
+  store_context +25, v36.i8<gpr1>
+  v98.i8<gpr0> = truncate v33.i32<gpr0>
+  v37.i8<gpr0> = xor v98.i8<gpr0>, 1
+  store_context +26, v37.i8<gpr0>
+  context_barrier
+  branch_true v37.i8<gpr0>, label1
+  v40.i64<gpr0> = load_context +64
+  v42.i32<gpr0> = load_offset v40.i64<gpr0>, 130
+  v43.i32<gpr0> = byte_swap v42.i32<gpr0>
+  v44.i64<gpr1> = zero_extend v43.i32<gpr0>
+  store_context +128, v44.i64<gpr1>
+  v48.i64<gpr1> = sub v44.i64<gpr1>, 1
+  store_context +80, v48.i64<gpr1>
+  v52.i32<gpr0> = not v43.i32<gpr0>
+  v53.i8<gpr0> = compare_ugt -1, v52.i32<gpr0>
+  store_context +2640, v53.i8<gpr0>
+  v54.i32<gpr0> = truncate v48.i64<gpr1>
+  v56.i8<gpr1> = compare_slt v54.i32<gpr0>, 0
+  store_context +0, v56.i8<gpr1>
+  v57.i8<gpr1> = compare_sgt v54.i32<gpr0>, 0
+  store_context +1, v57.i8<gpr1>
+  v58.i8<gpr0> = compare_eq v54.i32<gpr0>, 0
+  store_context +2, v58.i8<gpr0>
+  context_barrier
+  branch_true v58.i8<gpr0>, label2
+  v61.i64<gpr0> = load_context +256
+  store_context +64, v61.i64<gpr0>
+  store_context +88, 0
+  store_context +72, 1
+  context_barrier
+  set_return_address 820958A8
+  store_context +304, 820958A8
+  call KeReleaseSemaphore
+  context_barrier
+  branch label2
+label1:
+  ; in: label0, dom:1, uncond:0
+  ; out: label2, dom:0, uncond:1
+  context_barrier
+  set_return_address 820958B0
+  store_context +304, 820958B0
+  call <fn>
+  store_context +72, 1
+  v70.i64<gpr0> = load_context +288
+  v72.i32<gpr0> = load_offset v70.i64<gpr0>, -1654
+  v73.i32<gpr0> = byte_swap v72.i32<gpr0>
+  v74.i64<gpr0> = zero_extend v73.i32<gpr0>
+  store_context +64, v74.i64<gpr0>
+  context_barrier
+  set_return_address 820958BC
+  store_context +304, 820958BC
+  call <fn>
+label2:
+  ; in: label0, dom:0, uncond:1
+  ; in: label0, dom:0, uncond:0
+  ; in: label1, dom:0, uncond:1
+  ; out: label0, dom:1, uncond:0
+  v77.i64<gpr0> = load_context +264
+  store_context +64, v77.i64<gpr0>
+  store_context +80, 0
+  store_context +72, 1
+  context_barrier
+  set_return_address 820958CC
+  store_context +304, 820958CC
+  call KeSetEvent
+  v82.i64<gpr0> = load_context +280
+  v83.i32<gpr0> = truncate v82.i64<gpr0>
+  store_context +24, 0
+  v86.i8<gpr1> = compare_ne v83.i32<gpr0>, 0
+  store_context +25, v86.i8<gpr1>
+  v87.i8<gpr0> = compare_eq v83.i32<gpr0>, 0
+  store_context +26, v87.i8<gpr0>
+  context_barrier
+  branch_true v87.i8<gpr0>, label0
+  store_context +64, 0
+  v92.i64<gpr0> = load_context +48
+  v93.i64<gpr0> = add v92.i64<gpr0>, 80
+  store_context +48, v93.i64<gpr0>
+  context_barrier
+  call.2 __restgprlr_27
+<block3>:

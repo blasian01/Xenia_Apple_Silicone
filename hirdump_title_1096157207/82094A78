@@ -1,0 +1,63 @@
+<entry>:
+label0:
+  ; out: label1, dom:0, uncond:0
+  ; out: label1, dom:0, uncond:0
+  v0.i64<gpr0> = load_context +64
+  v1.i32<gpr0> = truncate v0.i64<gpr0>
+  store_context +24, 0
+  v4.i8<gpr1> = compare_ne v1.i32<gpr0>, 0
+  store_context +25, v4.i8<gpr1>
+  v5.i8<gpr0> = compare_eq v1.i32<gpr0>, 0
+  store_context +26, v5.i8<gpr0>
+  context_barrier
+  branch_true v5.i8<gpr0>, label1
+  v8.i64<gpr0> = load_context +288
+  store_context +80, v8.i64<gpr0>
+  v9.i64<gpr0> = load_context +280
+  store_context +72, v9.i64<gpr0>
+  context_barrier
+  set_return_address 82094A8C
+  store_context +304, 82094A8C
+  call <fn>
+  v12.i64<gpr0> = load_context +64
+  v13.i32<gpr0> = truncate v12.i64<gpr0>
+  store_context +24, 0
+  v16.i8<gpr1> = compare_ne v13.i32<gpr0>, 0
+  store_context +25, v16.i8<gpr1>
+  v17.i8<gpr0> = compare_eq v13.i32<gpr0>, 0
+  store_context +26, v17.i8<gpr0>
+  context_barrier
+  branch_true v17.i8<gpr0>, label1
+  v20.i64<gpr0> = load_context +64
+  v22.i32<gpr0> = load_offset v20.i64<gpr0>, 0
+  v23.i32<gpr0> = byte_swap v22.i32<gpr0>
+  v24.i64<gpr0> = zero_extend v23.i32<gpr0>
+  store_context +128, v24.i64<gpr0>
+  v25.i64<gpr1> = load_context +272
+  store_context +72, v25.i64<gpr1>
+  store_context +288, 0
+  v29.i32<gpr0> = load_offset v24.i64<gpr0>, 14
+  v30.i32<gpr0> = byte_swap v29.i32<gpr0>
+  v31.i64<gpr0> = zero_extend v30.i32<gpr0>
+  store_context +120, v31.i64<gpr0>
+  store_context +296, v31.i64<gpr0>
+  context_barrier
+  set_return_address 82094AAC
+  store_context +304, 82094AAC
+  call_indirect v31.i64<gpr0>
+  v35.i64<gpr0> = load_context +288
+  store_context +64, v35.i64<gpr0>
+  v37.i64<gpr0> = load_context +48
+  v38.i64<gpr0> = add v37.i64<gpr0>, 70
+  store_context +48, v38.i64<gpr0>
+  context_barrier
+  call.2 __restgprlr_29
+label1:
+  ; in: label0, dom:0, uncond:0
+  ; in: label0, dom:0, uncond:0
+  store_context +64, -7FF8FFF2
+  v45.i64<gpr0> = load_context +48
+  v46.i64<gpr0> = add v45.i64<gpr0>, 70
+  store_context +48, v46.i64<gpr0>
+  context_barrier
+  call.2 __restgprlr_29

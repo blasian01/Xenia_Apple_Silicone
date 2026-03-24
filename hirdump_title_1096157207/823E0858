@@ -1,0 +1,31 @@
+<entry>:
+label0:
+  v0.i64<gpr0> = load_context +64
+  v2.i64<gpr1> = sub v0.i64<gpr0>, 1
+  store_context +128, v2.i64<gpr1>
+  v5.i32<gpr0> = truncate v0.i64<gpr0>
+  v6.i32<gpr0> = not v5.i32<gpr0>
+  v7.i8<gpr0> = compare_ugt -1, v6.i32<gpr0>
+  v9.i64<gpr2> = not v2.i64<gpr1>
+  v12.i64<gpr3> = add_carry v9.i64<gpr2>, v2.i64<gpr1>, v7.i8<gpr0>
+  store_context +64, v12.i64<gpr3>
+  v14.i32<gpr2> = truncate v9.i64<gpr2>
+  v15.i32<gpr1> = truncate v2.i64<gpr1>
+  v16.i32<gpr0> = zero_extend v7.i8<gpr0>
+  v17.i32<gpr3> = add v14.i32<gpr2>, v15.i32<gpr1>
+  v18.i32<gpr3> = add v17.i32<gpr3>, v16.i32<gpr0>
+  v19.i8<gpr0> = compare_ult v18.i32<gpr3>, v16.i32<gpr0>
+  v20.i32<gpr1> = add v14.i32<gpr2>, v15.i32<gpr1>
+  v21.i8<gpr1> = compare_ult v20.i32<gpr1>, v14.i32<gpr2>
+  v22.i8<gpr0> = or v19.i8<gpr0>, v21.i8<gpr1>
+  store_context +2640, v22.i8<gpr0>
+  v24.i64<gpr0> = load_context +48
+  v25.i64<gpr0> = add v24.i64<gpr0>, 60
+  store_context +48, v25.i64<gpr0>
+  v28.i32<gpr0> = load_offset v25.i64<gpr0>, -8
+  v29.i32<gpr0> = byte_swap v28.i32<gpr0>
+  v30.i64<gpr0> = zero_extend v29.i32<gpr0>
+  store_context +136, v30.i64<gpr0>
+  store_context +304, v30.i64<gpr0>
+  context_barrier
+  call_indirect.6 v30.i64<gpr0>

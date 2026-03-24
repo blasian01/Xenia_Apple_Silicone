@@ -1,0 +1,11 @@
+<entry>:
+label0:
+  store_context +128, -1
+  store_context +64, 1
+  v2.i64<gpr0> = load_context +256
+  store_offset v2.i64<gpr0>, 4144, -1
+  v8.i64<gpr0> = load_context +48
+  v9.i64<gpr0> = add v8.i64<gpr0>, 6E0
+  store_context +48, v9.i64<gpr0>
+  context_barrier
+  call.2 __restgprlr_22

@@ -1,0 +1,59 @@
+<entry>:
+label0:
+  v1.i64<gpr0> = load_context +272
+  v2.i64<gpr0> = add v1.i64<gpr0>, 1
+  store_context +272, v2.i64<gpr0>
+  v4.i64<gpr0> = load_context +280
+  v5.i64<gpr0> = add v4.i64<gpr0>, C
+  store_context +280, v5.i64<gpr0>
+  v7.i64<gpr0> = load_context +288
+  v8.i64<gpr0> = add v7.i64<gpr0>, 1
+  store_context +288, v8.i64<gpr0>
+  v10.i32<gpr0> = truncate v8.i64<gpr0>
+  v12.i8<gpr1> = compare_slt v10.i32<gpr0>, 4
+  store_context +24, v12.i8<gpr1>
+  v13.i8<gpr2> = compare_sgt v10.i32<gpr0>, 4
+  store_context +25, v13.i8<gpr2>
+  v14.i8<gpr0> = compare_eq v10.i32<gpr0>, 4
+  store_context +26, v14.i8<gpr0>
+  context_barrier
+  call_true.2 v12.i8<gpr1>, <fn>
+  v18.i64<gpr0> = load_context +264
+  v19.i64<gpr0> = add v18.i64<gpr0>, 1
+  store_context +264, v19.i64<gpr0>
+  v21.i32<gpr0> = truncate v19.i64<gpr0>
+  v23.i8<gpr1> = compare_slt v21.i32<gpr0>, 4
+  store_context +24, v23.i8<gpr1>
+  v24.i8<gpr2> = compare_sgt v21.i32<gpr0>, 4
+  store_context +25, v24.i8<gpr2>
+  v25.i8<gpr0> = compare_eq v21.i32<gpr0>, 4
+  store_context +26, v25.i8<gpr0>
+  context_barrier
+  call_true.2 v23.i8<gpr1>, <fn>
+  v29.i64<gpr0> = load_context +248
+  v30.i64<gpr0> = add v29.i64<gpr0>, 1
+  store_context +248, v30.i64<gpr0>
+  v32.i32<gpr0> = truncate v30.i64<gpr0>
+  v34.i8<gpr1> = compare_slt v32.i32<gpr0>, 4
+  store_context +24, v34.i8<gpr1>
+  v35.i8<gpr2> = compare_sgt v32.i32<gpr0>, 4
+  store_context +25, v35.i8<gpr2>
+  v36.i8<gpr0> = compare_eq v32.i32<gpr0>, 4
+  store_context +26, v36.i8<gpr0>
+  context_barrier
+  call_true.2 v34.i8<gpr1>, <fn>
+  v40.i64<gpr0> = load_context +48
+  v41.i64<gpr0> = add v40.i64<gpr0>, C0
+  store_context +48, v41.i64<gpr0>
+  v44.i64<gpr1> = sub v41.i64<gpr0>, 48
+  v45.i64<gpr1> = load v44.i64<gpr1>
+  v46.i64<gpr1> = byte_swap v45.i64<gpr1>
+  v47.f64<vec0> = cast v46.i64<gpr1>
+  store_context +560, v47.f64<vec0>
+  v50.i64<gpr0> = sub v41.i64<gpr0>, 40
+  v51.i64<gpr0> = load v50.i64<gpr0>
+  v52.i64<gpr0> = byte_swap v51.i64<gpr0>
+  v53.f64<vec0> = cast v52.i64<gpr0>
+  store_context +568, v53.f64<vec0>
+  context_barrier
+  call.2 __restgprlr_26

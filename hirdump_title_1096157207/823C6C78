@@ -1,0 +1,11 @@
+<entry>:
+label0:
+  context_barrier
+  set_return_address 823C6C7C
+  store_context +304, 823C6C7C
+  call <fn>
+  v3.i64<gpr0> = load_context +48
+  v4.i64<gpr0> = add v3.i64<gpr0>, C0
+  store_context +48, v4.i64<gpr0>
+  context_barrier
+  call.2 __restgprlr_26

@@ -19,6 +19,7 @@ class A64Function : public GuestFunction {
 
   uint8_t* machine_code() const override { return machine_code_; }
   size_t machine_code_length() const override { return machine_code_length_; }
+  uint8_t* const* machine_code_slot() const { return &machine_code_; }
 
   void Setup(uint8_t* machine_code, size_t machine_code_length);
 

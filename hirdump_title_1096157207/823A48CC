@@ -1,0 +1,50 @@
+<entry>:
+label0:
+  store_context +104, -7DFFA8B0
+  store_context +88, 2
+  v9.i64<gpr0> = load_context +64
+  v10.i32<gpr0> = truncate v9.i64<gpr0>
+  v11.i32<gpr0> = byte_swap v10.i32<gpr0>
+  store_offset -7C240000, 31A4, v11.i32<gpr0>
+  store_context +64, -7DFFA8BC
+  store_context +96, 0
+  store_context +80, 0
+  store_context +72, 0
+  context_barrier
+  set_return_address 823A48F8
+  store_context +304, 823A48F8
+  call <fn>
+  store_context +128, -7DFD0000
+  store_context +120, -7DFD0000
+  store_context +88, -7DFCCECC
+  store_context +80, 0
+  v29.i64<gpr0> = load_context +64
+  v30.i32<gpr0> = truncate v29.i64<gpr0>
+  v31.i32<gpr0> = byte_swap v30.i32<gpr0>
+  store_offset -7C240000, 3340, v31.i32<gpr0>
+  store_context +64, -7DFCCED8
+  store_context +72, 0
+  context_barrier
+  set_return_address 823A491C
+  store_context +304, 823A491C
+  call <fn>
+  store_context +112, -7CC00000
+  v41.i64<gpr0> = load_context +64
+  v42.i32<gpr0> = truncate v41.i64<gpr0>
+  v43.i32<gpr0> = byte_swap v42.i32<gpr0>
+  store_offset -7CC00000, -24DC, v43.i32<gpr0>
+  context_barrier
+  set_return_address 823A4928
+  store_context +304, 823A4928
+  call <fn>
+  v47.i64<gpr0> = load_context +48
+  v48.i64<gpr0> = add v47.i64<gpr0>, 110
+  store_context +48, v48.i64<gpr0>
+  v51.i64<gpr0> = sub v48.i64<gpr0>, 30
+  store_context +136, v51.i64<gpr0>
+  context_barrier
+  set_return_address 823A4934
+  store_context +304, 823A4934
+  call __restfpr_16
+  context_barrier
+  call.2 __restgprlr_27

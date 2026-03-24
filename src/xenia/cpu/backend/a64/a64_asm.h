@@ -313,7 +313,7 @@ class A64Asm {
   void CSET(GReg rd, Cond cc) {
     CSEL(rd, XZR, XZR, static_cast<Cond>(cc ^ 1));
     // Actually CSINC: rd = (cc) ? 1 : 0
-    code_.back() = 0x9A9F0000 | ((cc ^ 1) << 12) | (XZR << 5) | rd |
+    code_.back() = 0x9A9F0400 | ((cc ^ 1) << 12) | (XZR << 5) | rd |
                    (XZR << 16);
   }
 

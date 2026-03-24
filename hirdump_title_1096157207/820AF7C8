@@ -1,0 +1,58 @@
+<entry>:
+label0:
+  ; out: label2, dom:0, uncond:1
+  ; out: label1, dom:1, uncond:0
+  v0.i64<gpr0> = load_context +280
+  v1.i32<gpr0> = truncate v0.i64<gpr0>
+  v2.i64<gpr1> = load_context +64
+  v3.i32<gpr1> = truncate v2.i64<gpr1>
+  v4.i8<gpr2> = compare_ult v1.i32<gpr0>, v3.i32<gpr1>
+  store_context +24, v4.i8<gpr2>
+  v5.i8<gpr2> = compare_ugt v1.i32<gpr0>, v3.i32<gpr1>
+  store_context +25, v5.i8<gpr2>
+  v6.i8<gpr0> = compare_eq v1.i32<gpr0>, v3.i32<gpr1>
+  store_context +26, v6.i8<gpr0>
+  context_barrier
+  branch_false v5.i8<gpr2>, label1
+  store_context +64, 0
+  context_barrier
+  branch label2
+label1:
+  ; in: label0, dom:1, uncond:0
+  ; out: label2, dom:0, uncond:1
+  v11.i64<gpr0> = load_context +288
+  v13.i32<gpr1> = load_offset v11.i64<gpr0>, 14
+  v14.i32<gpr1> = byte_swap v13.i32<gpr1>
+  v15.i64<gpr1> = zero_extend v14.i32<gpr1>
+  store_context +128, v15.i64<gpr1>
+  v18.i32<gpr2> = load_offset v11.i64<gpr0>, 18
+  v19.i32<gpr2> = byte_swap v18.i32<gpr2>
+  v20.i64<gpr2> = zero_extend v19.i32<gpr2>
+  store_context +120, v20.i64<gpr2>
+  v22.i64<gpr3> = load_context +280
+  v23.i64<gpr3> = add v15.i64<gpr1>, v22.i64<gpr3>
+  store_context +112, v23.i64<gpr3>
+  v26.i64<gpr1> = add v20.i64<gpr2>, v15.i64<gpr1>
+  store_context +64, v26.i64<gpr1>
+  v30.i32<gpr1> = truncate v23.i64<gpr3>
+  v31.i32<gpr1> = byte_swap v30.i32<gpr1>
+  store_offset v11.i64<gpr0>, 14, v31.i32<gpr1>
+label2:
+  ; in: label0, dom:0, uncond:1
+  ; in: label1, dom:0, uncond:1
+  v33.i64<gpr0> = load_context +48
+  v34.i64<gpr0> = add v33.i64<gpr0>, 70
+  store_context +48, v34.i64<gpr0>
+  v37.i32<gpr1> = load_offset v34.i64<gpr0>, -8
+  v38.i32<gpr1> = byte_swap v37.i32<gpr1>
+  v39.i64<gpr1> = zero_extend v38.i32<gpr1>
+  store_context +136, v39.i64<gpr1>
+  store_context +304, v39.i64<gpr1>
+  v43.i64<gpr2> = load_offset v34.i64<gpr0>, -18
+  v44.i64<gpr2> = byte_swap v43.i64<gpr2>
+  store_context +280, v44.i64<gpr2>
+  v47.i64<gpr0> = load_offset v34.i64<gpr0>, -10
+  v48.i64<gpr0> = byte_swap v47.i64<gpr0>
+  store_context +288, v48.i64<gpr0>
+  context_barrier
+  call_indirect.6 v39.i64<gpr1>

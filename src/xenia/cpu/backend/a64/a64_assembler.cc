@@ -54,6 +54,9 @@ bool A64Assembler::Assemble(GuestFunction* function,
 
   // Copy source map
   function->source_map() = std::move(source_map);
+  if (debug_info && (debug_info_flags & DebugInfoFlags::kDebugInfoAllDisasm)) {
+    debug_info->Dump();
+  }
 
   return true;
 }

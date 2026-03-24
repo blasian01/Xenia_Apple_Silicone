@@ -1,0 +1,11 @@
+<entry>:
+label0:
+  v1.i64<gpr0> = load_context +80
+  v2.i64<gpr0> = add v1.i64<gpr0>, 1
+  store_context +40, v2.i64<gpr0>
+  v3.i64<gpr0> = load_context +64
+  store_context +88, v3.i64<gpr0>
+  v5.i64<gpr0> = load_context +40
+  store_context +296, v5.i64<gpr0>
+  context_barrier
+  call.2 <fn>

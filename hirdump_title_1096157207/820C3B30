@@ -1,0 +1,31 @@
+<entry>:
+label0:
+  v0.i64<gpr0> = load_context +288
+  v2.i8<gpr1> = load_offset v0.i64<gpr0>, 2ABD
+  v3.i64<gpr1> = zero_extend v2.i8<gpr1>
+  store_context +64, v0.i64<gpr0>
+  v7.i64<gpr1> = and v3.i64<gpr1>, EF
+  store_context +128, v7.i64<gpr1>
+  v8.i32<gpr2> = truncate v7.i64<gpr1>
+  store_context +0, 0
+  v11.i8<gpr3> = compare_ne v8.i32<gpr2>, 0
+  store_context +1, v11.i8<gpr3>
+  v12.i8<gpr2> = compare_eq v8.i32<gpr2>, 0
+  store_context +2, v12.i8<gpr2>
+  v16.i8<gpr1> = truncate v7.i64<gpr1>
+  store_offset v0.i64<gpr0>, 2ABD, v16.i8<gpr1>
+  context_barrier
+  set_return_address 820C3B44
+  store_context +304, 820C3B44
+  call <fn>
+  v19.i64<gpr0> = load_context +288
+  store_context +64, v19.i64<gpr0>
+  context_barrier
+  set_return_address 820C3B4C
+  store_context +304, 820C3B4C
+  call <fn>
+  v23.i64<gpr0> = load_context +48
+  v24.i64<gpr0> = add v23.i64<gpr0>, 250
+  store_context +48, v24.i64<gpr0>
+  context_barrier
+  call.2 __restgprlr_17

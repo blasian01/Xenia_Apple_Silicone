@@ -1,0 +1,63 @@
+<entry>:
+label0:
+  ; out: label1, dom:1, uncond:0
+  v0.i64<gpr0> = load_context +64
+  store_context +288, v0.i64<gpr0>
+  v2.i32<gpr0> = truncate v0.i64<gpr0>
+  store_context +24, 0
+  v5.i8<gpr1> = compare_ne v2.i32<gpr0>, 0
+  store_context +25, v5.i8<gpr1>
+  v6.i8<gpr0> = compare_eq v2.i32<gpr0>, 0
+  store_context +26, v6.i8<gpr0>
+  context_barrier
+  branch_true v6.i8<gpr0>, label1
+  v9.i64<gpr0> = load_context +232
+  store_context +120, v9.i64<gpr0>
+  v10.i64<gpr0> = load_context +240
+  store_context +112, v10.i64<gpr0>
+  v11.i64<gpr0> = load_context +256
+  store_context +96, v11.i64<gpr0>
+  v12.i64<gpr0> = load_context +248
+  store_context +104, v12.i64<gpr0>
+  v13.i64<gpr0> = load_context +264
+  store_context +88, v13.i64<gpr0>
+  v14.i64<gpr0> = load_context +272
+  store_context +80, v14.i64<gpr0>
+  v15.i64<gpr0> = load_context +280
+  store_context +72, v15.i64<gpr0>
+  context_barrier
+  set_return_address 822E1598
+  store_context +304, 822E1598
+  call <fn>
+  v18.i64<gpr0> = load_context +288
+  store_context +64, v18.i64<gpr0>
+  v20.i64<gpr0> = load_context +48
+  v21.i64<gpr0> = add v20.i64<gpr0>, A0
+  store_context +48, v21.i64<gpr0>
+  context_barrier
+  call.2 __restgprlr_24
+label1:
+  ; in: label0, dom:1, uncond:0
+  v23.i64<gpr0> = load_context +232
+  store_context +112, v23.i64<gpr0>
+  v24.i64<gpr0> = load_context +240
+  store_context +104, v24.i64<gpr0>
+  v25.i64<gpr0> = load_context +256
+  store_context +88, v25.i64<gpr0>
+  v26.i64<gpr0> = load_context +248
+  store_context +96, v26.i64<gpr0>
+  v27.i64<gpr0> = load_context +264
+  store_context +80, v27.i64<gpr0>
+  v28.i64<gpr0> = load_context +272
+  store_context +72, v28.i64<gpr0>
+  v29.i64<gpr0> = load_context +280
+  store_context +64, v29.i64<gpr0>
+  context_barrier
+  set_return_address 822E15C4
+  store_context +304, 822E15C4
+  call <fn>
+  v33.i64<gpr0> = load_context +48
+  v34.i64<gpr0> = add v33.i64<gpr0>, A0
+  store_context +48, v34.i64<gpr0>
+  context_barrier
+  call.2 __restgprlr_24

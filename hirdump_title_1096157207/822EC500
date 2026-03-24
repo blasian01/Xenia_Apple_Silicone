@@ -1,0 +1,15 @@
+<entry>:
+label0:
+  store_context +128, -7C610000
+  v1.i64<gpr0> = load_context +64
+  v3.i64<gpr0> = mul v1.i64<gpr0>, 1C
+  store_context +120, v3.i64<gpr0>
+  v5.i64<gpr0> = load_context +128
+  v6.i64<gpr0> = sub v5.i64<gpr0>, 5F90
+  store_context +128, v6.i64<gpr0>
+  v7.i64<gpr0> = load_context +120
+  v8.i64<gpr1> = load_context +128
+  v9.i64<gpr0> = add v7.i64<gpr0>, v8.i64<gpr1>
+  store_context +64, v9.i64<gpr0>
+  context_barrier
+  call.2 RtlLeaveCriticalSection

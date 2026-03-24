@@ -1,0 +1,13 @@
+<entry>:
+label0:
+  v1.i64<gpr0> = load_context +48
+  v2.i64<gpr0> = add v1.i64<gpr0>, D0
+  store_context +48, v2.i64<gpr0>
+  v5.i64<gpr0> = sub v2.i64<gpr0>, 20
+  store_context +136, v5.i64<gpr0>
+  context_barrier
+  set_return_address 822E19C4
+  store_context +304, 822E19C4
+  call __restfpr_25
+  context_barrier
+  call.2 __restgprlr_29

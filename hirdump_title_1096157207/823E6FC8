@@ -1,0 +1,19 @@
+<entry>:
+label0:
+  store_context +128, -7DBE0000
+  v1.i64<gpr0> = load_context +64
+  v3.i64<gpr0> = shl v1.i64<gpr0>, 3
+  v5.i64<gpr0> = and v3.i64<gpr0>, FFFFFFFF
+  store_context +120, v5.i64<gpr0>
+  v7.i64<gpr0> = load_context +128
+  v8.i64<gpr0> = add v7.i64<gpr0>, 40
+  store_context +128, v8.i64<gpr0>
+  v9.i64<gpr0> = load_context +120
+  v10.i64<gpr1> = load_context +128
+  v11.i64<gpr0> = add v9.i64<gpr0>, v10.i64<gpr1>
+  v12.i32<gpr0> = load v11.i64<gpr0>
+  v13.i32<gpr0> = byte_swap v12.i32<gpr0>
+  v14.i64<gpr0> = zero_extend v13.i32<gpr0>
+  store_context +64, v14.i64<gpr0>
+  context_barrier
+  call.2 RtlLeaveCriticalSection

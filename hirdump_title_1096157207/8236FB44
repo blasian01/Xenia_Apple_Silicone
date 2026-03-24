@@ -1,0 +1,9 @@
+<entry>:
+label0:
+  v0.i64<gpr0> = load_context +48
+  v2.i32<gpr0> = load_offset v0.i64<gpr0>, 50
+  v3.i32<gpr0> = byte_swap v2.i32<gpr0>
+  v4.i64<gpr0> = zero_extend v3.i32<gpr0>
+  store_context +64, v4.i64<gpr0>
+  context_barrier
+  call.2 <fn>

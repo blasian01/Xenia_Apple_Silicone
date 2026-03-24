@@ -1,0 +1,15 @@
+<entry>:
+label0:
+  v0.i64<gpr0> = load_context +72
+  v1.i32<gpr0> = truncate v0.i64<gpr0>
+  store_context +24, 0
+  v4.i8<gpr1> = compare_ne v1.i32<gpr0>, 0
+  store_context +25, v4.i8<gpr1>
+  v5.i8<gpr0> = compare_eq v1.i32<gpr0>, 0
+  store_context +26, v5.i8<gpr0>
+  context_barrier
+  v6.i8<gpr0> = load_context +26
+  v7.i64<gpr1> = load_context +304
+  call_indirect_true.6 v6.i8<gpr0>, v7.i64<gpr1>
+  context_barrier
+  call.2 MmSetAddressProtect

@@ -1,0 +1,8 @@
+<entry>:
+label0:
+  store_context +64, 1
+  v2.i64<gpr0> = load_context +48
+  v3.i64<gpr0> = add v2.i64<gpr0>, B0
+  store_context +48, v3.i64<gpr0>
+  context_barrier
+  call.2 __restgprlr_22

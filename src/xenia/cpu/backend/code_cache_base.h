@@ -99,7 +99,7 @@ class CodeCacheBase : public CodeCache {
 
   const std::filesystem::path& file_name() const override { return file_name_; }
   uintptr_t execute_base_address() const override {
-    return kGeneratedCodeExecuteBase;
+    return (uintptr_t)generated_code_execute_base_;
   }
   size_t total_size() const override { return kGeneratedCodeSize; }
 
@@ -244,7 +244,7 @@ class CodeCacheBase : public CodeCache {
   }
 
   GuestFunction* LookupFunction(uint64_t host_pc) override {
-    uint32_t key = uint32_t(host_pc - kGeneratedCodeExecuteBase);
+    uint32_t key = uint32_t(host_pc - (uintptr_t)generated_code_execute_base_);
     void* fn_entry = std::bsearch(
         &key, generated_code_map_.data(), generated_code_map_.size(),
         sizeof(std::pair<uint32_t, Function*>),

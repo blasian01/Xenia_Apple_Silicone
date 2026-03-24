@@ -1,0 +1,12 @@
+<entry>:
+label0:
+  v1.i64<gpr0> = load_context +48
+  v2.i64<gpr0> = add v1.i64<gpr0>, A0
+  store_context +48, v2.i64<gpr0>
+  v5.i64<gpr0> = sub v2.i64<gpr0>, 38
+  v6.i64<gpr0> = load v5.i64<gpr0>
+  v7.i64<gpr0> = byte_swap v6.i64<gpr0>
+  v8.f64<vec0> = cast v7.i64<gpr0>
+  store_context +568, v8.f64<vec0>
+  context_barrier
+  call.2 __restgprlr_27

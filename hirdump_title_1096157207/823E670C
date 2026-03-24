@@ -1,0 +1,8 @@
+<entry>:
+label0:
+  v0.i64<gpr0> = load_context +256
+  v2.i64<gpr0> = or v0.i64<gpr0>, 40
+  store_context +256, v2.i64<gpr0>
+  store_context +104, A
+  context_barrier
+  call.2 <fn>

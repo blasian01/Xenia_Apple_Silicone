@@ -1,0 +1,30 @@
+<entry>:
+label0:
+  store_context +120, -7DFD0000
+  store_context +128, 0
+  store_context +112, 1
+  store_context +104, -7DFCDB74
+  v6.i64<gpr0> = load_context +288
+  store_offset v6.i64<gpr0>, 58, 0
+  store_context +96, 2
+  store_offset v6.i64<gpr0>, 54, 1000000
+  store_offset v6.i64<gpr0>, 0, -73DBFC7E
+  store_context +64, v6.i64<gpr0>
+  store_offset v6.i64<gpr0>, 5C, 0
+  store_offset v6.i64<gpr0>, 60, 0
+  store_offset v6.i64<gpr0>, 4, 2000000
+  store_offset v6.i64<gpr0>, 4C, 0
+  store_offset v6.i64<gpr0>, 50, 0
+  v49.i64<gpr0> = load_context +48
+  v50.i64<gpr0> = add v49.i64<gpr0>, 60
+  store_context +48, v50.i64<gpr0>
+  v53.i32<gpr1> = load_offset v50.i64<gpr0>, -8
+  v54.i32<gpr1> = byte_swap v53.i32<gpr1>
+  v55.i64<gpr1> = zero_extend v54.i32<gpr1>
+  store_context +136, v55.i64<gpr1>
+  store_context +304, v55.i64<gpr1>
+  v59.i64<gpr0> = load_offset v50.i64<gpr0>, -10
+  v60.i64<gpr0> = byte_swap v59.i64<gpr0>
+  store_context +288, v60.i64<gpr0>
+  context_barrier
+  call_indirect.6 v55.i64<gpr1>

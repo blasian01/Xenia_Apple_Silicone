@@ -1,0 +1,23 @@
+<entry>:
+label0:
+  store_context +128, -7DFC0000
+  store_context +120, -7C6C0000
+  v3.i64<gpr0> = load_context +128
+  v4.i64<gpr0> = sub v3.i64<gpr0>, 1420
+  store_context +112, v4.i64<gpr0>
+  v6.i64<gpr0> = load_context +120
+  v7.i64<gpr0> = sub v6.i64<gpr0>, 7780
+  store_context +104, v7.i64<gpr0>
+  v8.i64<gpr0> = load_context +112
+  v10.i64<gpr0> = and v8.i64<gpr0>, -10
+  v11.v128<vec0> = load v10.i64<gpr0>
+  v12.v128<vec0> = byte_swap v11.v128<vec0>
+  store_context +1584, v12.v128<vec0>
+  v13.i64<gpr0> = load_context +104
+  v15.i64<gpr0> = and v13.i64<gpr0>, -10
+  v16.v128<vec0> = load_context +1584
+  v17.v128<vec0> = byte_swap v16.v128<vec0>
+  store v15.i64<gpr0>, v17.v128<vec0>
+  context_barrier
+  v18.i64<gpr0> = load_context +304
+  call_indirect.6 v18.i64<gpr0>

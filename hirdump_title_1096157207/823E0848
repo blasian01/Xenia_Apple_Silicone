@@ -1,0 +1,57 @@
+<entry>:
+label0:
+  v0.i64<gpr0> = load_context +304
+  store_context +136, v0.i64<gpr0>
+  v1.i64<gpr0> = load_context +48
+  v3.i64<gpr1> = load_context +136
+  v4.i32<gpr1> = truncate v3.i64<gpr1>
+  v5.i32<gpr1> = byte_swap v4.i32<gpr1>
+  store_offset v1.i64<gpr0>, -8, v5.i32<gpr1>
+  v6.i64<gpr0> = load_context +48
+  v8.i64<gpr0> = sub v6.i64<gpr0>, 60
+  v9.i64<gpr1> = load_context +48
+  v10.i32<gpr1> = truncate v9.i64<gpr1>
+  v11.i32<gpr1> = byte_swap v10.i32<gpr1>
+  store v8.i64<gpr0>, v11.i32<gpr1>
+  store_context +48, v8.i64<gpr0>
+  context_barrier
+  set_return_address 823E0858
+  store_context +304, 823E0858
+  call <fn>
+  v14.i64<gpr0> = load_context +64
+  v16.i64<gpr1> = sub v14.i64<gpr0>, 1
+  store_context +128, v16.i64<gpr1>
+  v19.i32<gpr0> = truncate v14.i64<gpr0>
+  v20.i32<gpr0> = not v19.i32<gpr0>
+  v21.i8<gpr0> = compare_ugt -1, v20.i32<gpr0>
+  store_context +2640, v21.i8<gpr0>
+  v22.i64<gpr0> = load_context +128
+  v23.i64<gpr0> = not v22.i64<gpr0>
+  v24.i64<gpr1> = load_context +128
+  v25.i8<gpr2> = load_context +2640
+  v26.i64<gpr2> = add_carry v23.i64<gpr0>, v24.i64<gpr1>, v25.i8<gpr2>
+  store_context +64, v26.i64<gpr2>
+  v27.i8<gpr2> = load_context +2640
+  v28.i32<gpr0> = truncate v23.i64<gpr0>
+  v29.i32<gpr1> = truncate v24.i64<gpr1>
+  v30.i32<gpr2> = zero_extend v27.i8<gpr2>
+  v31.i32<gpr3> = add v28.i32<gpr0>, v29.i32<gpr1>
+  v32.i32<gpr3> = add v31.i32<gpr3>, v30.i32<gpr2>
+  v33.i8<gpr2> = compare_ult v32.i32<gpr3>, v30.i32<gpr2>
+  v34.i32<gpr1> = add v28.i32<gpr0>, v29.i32<gpr1>
+  v35.i8<gpr0> = compare_ult v34.i32<gpr1>, v28.i32<gpr0>
+  v36.i8<gpr0> = or v33.i8<gpr2>, v35.i8<gpr0>
+  store_context +2640, v36.i8<gpr0>
+  v38.i64<gpr0> = load_context +48
+  v39.i64<gpr0> = add v38.i64<gpr0>, 60
+  store_context +48, v39.i64<gpr0>
+  v40.i64<gpr0> = load_context +48
+  v42.i32<gpr0> = load_offset v40.i64<gpr0>, -8
+  v43.i32<gpr0> = byte_swap v42.i32<gpr0>
+  v44.i64<gpr0> = zero_extend v43.i32<gpr0>
+  store_context +136, v44.i64<gpr0>
+  v45.i64<gpr0> = load_context +136
+  store_context +304, v45.i64<gpr0>
+  context_barrier
+  v46.i64<gpr0> = load_context +304
+  call_indirect.6 v46.i64<gpr0>

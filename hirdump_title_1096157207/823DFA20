@@ -1,0 +1,32 @@
+<entry>:
+label0:
+  v0.i64<gpr0> = load_context +64
+  v1.i32<gpr0> = truncate v0.i64<gpr0>
+  v3.i8<gpr1> = compare_slt v1.i32<gpr0>, 41
+  store_context +24, v3.i8<gpr1>
+  v4.i8<gpr1> = compare_sgt v1.i32<gpr0>, 41
+  store_context +25, v4.i8<gpr1>
+  v5.i8<gpr0> = compare_eq v1.i32<gpr0>, 41
+  store_context +26, v5.i8<gpr0>
+  context_barrier
+  v6.i8<gpr0> = load_context +24
+  v7.i64<gpr1> = load_context +304
+  call_indirect_true.6 v6.i8<gpr0>, v7.i64<gpr1>
+  v8.i64<gpr0> = load_context +64
+  v9.i32<gpr0> = truncate v8.i64<gpr0>
+  v11.i8<gpr1> = compare_slt v9.i32<gpr0>, 5A
+  store_context +24, v11.i8<gpr1>
+  v12.i8<gpr1> = compare_sgt v9.i32<gpr0>, 5A
+  store_context +25, v12.i8<gpr1>
+  v13.i8<gpr0> = compare_eq v9.i32<gpr0>, 5A
+  store_context +26, v13.i8<gpr0>
+  context_barrier
+  v14.i8<gpr0> = load_context +25
+  v15.i64<gpr1> = load_context +304
+  call_indirect_true.6 v14.i8<gpr0>, v15.i64<gpr1>
+  v17.i64<gpr0> = load_context +64
+  v18.i64<gpr0> = add v17.i64<gpr0>, 20
+  store_context +64, v18.i64<gpr0>
+  context_barrier
+  v19.i64<gpr0> = load_context +304
+  call_indirect.6 v19.i64<gpr0>

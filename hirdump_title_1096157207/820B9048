@@ -1,0 +1,17 @@
+<entry>:
+label0:
+  v0.i64<gpr0> = load_context +280
+  v2.i32<gpr1> = load_offset v0.i64<gpr0>, 0
+  v3.i32<gpr1> = byte_swap v2.i32<gpr1>
+  v4.i64<gpr1> = zero_extend v3.i32<gpr1>
+  store_context +64, v0.i64<gpr0>
+  v8.i64<gpr1> = or v4.i64<gpr1>, 100000
+  store_context +128, v8.i64<gpr1>
+  v12.i32<gpr1> = truncate v8.i64<gpr1>
+  v13.i32<gpr1> = byte_swap v12.i32<gpr1>
+  store_offset v0.i64<gpr0>, 0, v13.i32<gpr1>
+  v15.i64<gpr0> = load_context +48
+  v16.i64<gpr0> = add v15.i64<gpr0>, 80
+  store_context +48, v16.i64<gpr0>
+  context_barrier
+  call.2 __restgprlr_27

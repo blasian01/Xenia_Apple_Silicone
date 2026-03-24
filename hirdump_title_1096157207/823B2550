@@ -1,0 +1,19 @@
+<entry>:
+label0:
+  v0.i64<gpr0> = load_context +96
+  store_context +112, v0.i64<gpr0>
+  store_context +96, 2000000
+  v2.i64<gpr0> = load_context +88
+  store_context +104, v2.i64<gpr0>
+  v3.i64<gpr0> = load_context +96
+  v5.i64<gpr0> = or v3.i64<gpr0>, 3
+  store_context +96, v5.i64<gpr0>
+  store_context +88, 1
+  v7.i64<gpr0> = load_context +80
+  v9.i64<gpr0> = and v7.i64<gpr0>, FFFF
+  store_context +80, v9.i64<gpr0>
+  v10.i64<gpr0> = load_context +72
+  v12.i64<gpr0> = and v10.i64<gpr0>, FFFF
+  store_context +72, v12.i64<gpr0>
+  context_barrier
+  call.2 <fn>

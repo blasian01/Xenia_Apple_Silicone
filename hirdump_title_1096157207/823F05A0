@@ -1,0 +1,24 @@
+<entry>:
+label0:
+  store_context +128, -7DBF0000
+  store_context +120, -7DBF0000
+  v3.i64<gpr0> = load_context +128
+  v4.i64<gpr0> = add v3.i64<gpr0>, 1CF0
+  store_context +112, v4.i64<gpr0>
+  v5.i64<gpr0> = load_context +120
+  v7.i64<gpr0> = add v5.i64<gpr0>, 1CD8
+  v8.i32<gpr0> = load v7.i64<gpr0>
+  v9.i32<gpr0> = byte_swap v8.i32<gpr0>
+  v10.f32<vec0> = cast v9.i32<gpr0>
+  v11.f64<vec0> = convert v10.f32<vec0>
+  store_context +320, v11.f64<vec0>
+  v12.i64<gpr0> = load_context +112
+  v14.i64<gpr0> = add v12.i64<gpr0>, 8
+  v15.f64<vec0> = load_context +320
+  v16.f32<vec0> = convert v15.f64<vec0>
+  v17.i32<gpr1> = cast v16.f32<vec0>
+  v18.i32<gpr1> = byte_swap v17.i32<gpr1>
+  store v14.i64<gpr0>, v18.i32<gpr1>
+  context_barrier
+  v19.i64<gpr0> = load_context +304
+  call_indirect.6 v19.i64<gpr0>

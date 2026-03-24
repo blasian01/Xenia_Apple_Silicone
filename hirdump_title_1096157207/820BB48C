@@ -1,0 +1,8 @@
+<entry>:
+label0:
+  v0.i64<gpr0> = load_context +288
+  v2.i64<gpr1> = load_context +248
+  v3.i8<gpr1> = truncate v2.i64<gpr1>
+  store_offset v0.i64<gpr0>, 10, v3.i8<gpr1>
+  context_barrier
+  call.2 <fn>

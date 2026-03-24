@@ -1,0 +1,17 @@
+<entry>:
+label0:
+  store_context +128, 6
+  store_context +120, EA6
+  v2.i64<gpr0> = load_context +72
+  v4.i64<gpr1> = load_context +128
+  v5.i8<gpr1> = truncate v4.i64<gpr1>
+  store_offset v2.i64<gpr0>, 0, v5.i8<gpr1>
+  store_context +64, 0
+  v7.i64<gpr0> = load_context +72
+  v9.i64<gpr1> = load_context +120
+  v10.i16<gpr1> = truncate v9.i64<gpr1>
+  v11.i16<gpr1> = byte_swap v10.i16<gpr1>
+  store_offset v7.i64<gpr0>, 2, v11.i16<gpr1>
+  context_barrier
+  v12.i64<gpr0> = load_context +304
+  call_indirect.6 v12.i64<gpr0>

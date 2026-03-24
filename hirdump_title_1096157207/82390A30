@@ -1,0 +1,38 @@
+<entry>:
+label0:
+  v0.i64<gpr0> = load_context +280
+  v3.i64<gpr1> = sub v0.i64<gpr0>, 1
+  store_context +280, v3.i64<gpr1>
+  v6.i32<gpr0> = truncate v0.i64<gpr0>
+  v7.i32<gpr0> = not v6.i32<gpr0>
+  v8.i8<gpr0> = compare_ugt -1, v7.i32<gpr0>
+  store_context +2640, v8.i8<gpr0>
+  v9.i32<gpr0> = truncate v3.i64<gpr1>
+  v11.i8<gpr1> = compare_slt v9.i32<gpr0>, 0
+  store_context +0, v11.i8<gpr1>
+  v12.i8<gpr1> = compare_sgt v9.i32<gpr0>, 0
+  store_context +1, v12.i8<gpr1>
+  v13.i8<gpr1> = compare_eq v9.i32<gpr0>, 0
+  store_context +2, v13.i8<gpr1>
+  v15.i64<gpr1> = load_context +288
+  v16.i64<gpr1> = add v15.i64<gpr1>, 6C
+  store_context +288, v16.i64<gpr1>
+  context_barrier
+  v41.i8<gpr0> = compare_ne v9.i32<gpr0>, 0
+  call_true.2 v41.i8<gpr0>, <fn>
+  v22.i64<gpr0> = load_context +48
+  v23.i64<gpr0> = add v22.i64<gpr0>, 120
+  store_context +48, v23.i64<gpr0>
+  v26.i64<gpr1> = sub v23.i64<gpr0>, A8
+  v27.i64<gpr1> = load v26.i64<gpr1>
+  v28.i64<gpr1> = byte_swap v27.i64<gpr1>
+  v29.f64<vec0> = cast v28.i64<gpr1>
+  store_context +560, v29.f64<vec0>
+  v32.i64<gpr0> = sub v23.i64<gpr0>, A0
+  v33.i64<gpr0> = load v32.i64<gpr0>
+  v34.i64<gpr0> = byte_swap v33.i64<gpr0>
+  v35.f64<vec0> = cast v34.i64<gpr0>
+  store_context +568, v35.f64<vec0>
+  context_barrier
+  call.2 __restgprlr_14
+<block1>:

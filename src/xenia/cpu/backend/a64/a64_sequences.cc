@@ -37,6 +37,17 @@ enum : uint32_t {
 static constexpr uint32_t kA64BackendHasReserveMask =
     1u << kA64BackendHasReserveBit;
 static constexpr uintptr_t kMinimumLikelyHostPointer = 0x100000000ull;
+static constexpr uint32_t kTrackedContextGuestFunction = 0x820B8E78;
+static constexpr uint64_t kTrackedContextOffsetR3 =
+    offsetof(ppc::PPCContext, r[3]);
+static constexpr uint64_t kTrackedContextOffsetR11 =
+    offsetof(ppc::PPCContext, r[11]);
+static constexpr uint64_t kTrackedContextOffsetR28 =
+    offsetof(ppc::PPCContext, r[28]);
+static constexpr uint64_t kTrackedContextOffsetR30 =
+    offsetof(ppc::PPCContext, r[30]);
+static constexpr uint64_t kTrackedCountFieldStageRawLoad = 0;
+static constexpr uint64_t kTrackedCountFieldStageByteSwap = 1;
 
 static bool ShouldLogPossibleGuestReturnMismatch(uint32_t guest_function) {
   switch (guest_function) {
@@ -57,6 +68,37 @@ static bool ShouldLogPreparedReturnAddress(uint32_t guest_function) {
       return true;
     default:
       return false;
+  }
+}
+
+static bool ShouldTraceContextAccess(uint32_t guest_function, uint64_t offset) {
+  if (guest_function != kTrackedContextGuestFunction) {
+    return false;
+  }
+  switch (offset) {
+    case kTrackedContextOffsetR3:
+    case kTrackedContextOffsetR11:
+    case kTrackedContextOffsetR30:
+      return true;
+    default:
+      return false;
+  }
+}
+
+static uint64_t EncodeTrackedContextAccess(uint64_t offset, bool is_store) {
+  return (offset & 0xFFFFull) | (is_store ? (1ull << 16) : 0);
+}
+
+static const char* TrackedContextOffsetName(uint64_t offset) {
+  switch (offset) {
+    case kTrackedContextOffsetR3:
+      return "r3";
+    case kTrackedContextOffsetR11:
+      return "r11";
+    case kTrackedContextOffsetR30:
+      return "r30";
+    default:
+      return "unknown";
   }
 }
 
@@ -440,6 +482,173 @@ extern "C" uint64_t A64LogZeroIndirectGuestTarget(void* raw_context,
       static_cast<uint32_t>(guest_context->r[1]),
       static_cast<uint32_t>(guest_context->r[13]));
   return 0;
+}
+
+extern "C" uint64_t A64LogTrackedContextAccess(void* raw_context,
+                                               uint64_t encoded_access,
+                                               uint64_t value) {
+  static std::atomic<uint64_t> access_log_count{0};
+  const uint64_t count = ++access_log_count;
+  const uint64_t offset = encoded_access & 0xFFFFull;
+  const bool is_store = (encoded_access & (1ull << 16)) != 0;
+  const uint32_t low32 = static_cast<uint32_t>(value);
+  if (count > 96 && low32 != 0) {
+    return 0;
+  }
+
+  auto* guest_context = reinterpret_cast<ppc::PPCContext_s*>(raw_context);
+  XELOGI(
+      "ARM64: ctx-trace #{} guest={:08X} kind={} {} value={:016X} "
+      "low32={:08X} ctx_lr={:08X}",
+      count, kTrackedContextGuestFunction, is_store ? "store" : "load",
+      TrackedContextOffsetName(offset), value, low32,
+      static_cast<uint32_t>(guest_context->lr));
+  return 0;
+}
+
+static void MaybeEmitTrackedContextAccess(A64Emitter& e, uint64_t offset,
+                                          GReg value_reg, bool is_store) {
+  if (!ShouldTraceContextAccess(e.current_guest_function(), offset)) {
+    return;
+  }
+
+  auto backend = static_cast<A64Backend*>(e.backend());
+  e.MovImm64(X0, reinterpret_cast<uint64_t>(&A64LogTrackedContextAccess));
+  e.MovImm64(X1, EncodeTrackedContextAccess(offset, is_store));
+  if (value_reg != X2) {
+    e.asm_().ORR(X2, value_reg, value_reg);
+  }
+  e.MovImm64(kScratch0,
+             reinterpret_cast<uint64_t>(backend->guest_to_host_thunk()));
+  e.asm_().BLR(kScratch0);
+}
+
+extern "C" uint64_t A64LogTrackedLoopSetup(void* raw_context,
+                                           uint64_t count_value,
+                                           uint64_t unused) {
+  auto* guest_context = reinterpret_cast<ppc::PPCContext_s*>(raw_context);
+  const uint32_t r27 = static_cast<uint32_t>(guest_context->r[27]);
+  const uint32_t r29 = static_cast<uint32_t>(guest_context->r[29]);
+  const uint32_t r30 = static_cast<uint32_t>(guest_context->r[30]);
+  const uint32_t r31 = static_cast<uint32_t>(guest_context->r[31]);
+
+  uint32_t outer_offset_raw = 0;
+  uint32_t outer_offset = 0;
+  if (auto* ptr = guest_context->TranslateVirtual<const uint32_t*>(r27)) {
+    outer_offset_raw = *ptr;
+    outer_offset = xe::byte_swap(outer_offset_raw);
+  }
+
+  const uint32_t sub_base = r31 + outer_offset;
+  uint32_t field380_raw = 0;
+  uint32_t field380 = 0;
+  if (auto* ptr =
+          guest_context->TranslateVirtual<const uint32_t*>(sub_base + 380)) {
+    field380_raw = *ptr;
+    field380 = xe::byte_swap(field380_raw);
+  }
+
+  uint32_t field384_raw = 0;
+  uint32_t field384 = 0;
+  if (auto* ptr =
+          guest_context->TranslateVirtual<const uint32_t*>(sub_base + 384)) {
+    field384_raw = *ptr;
+    field384 = xe::byte_swap(field384_raw);
+  }
+
+  XELOGI(
+      "ARM64: loop-setup guest={:08X} lr={:08X} r27={:08X} offset_raw={:08X} "
+      "offset={:08X} sub_base={:08X} field380_raw={:08X} field380={:08X} "
+      "field384_raw={:08X} field384={:08X} count={:08X} r29={:08X} "
+      "r30={:08X} r31={:08X}",
+      kTrackedContextGuestFunction, static_cast<uint32_t>(guest_context->lr),
+      r27, outer_offset_raw, outer_offset, sub_base, field380_raw, field380,
+      field384_raw, field384, static_cast<uint32_t>(count_value), r29, r30,
+      r31);
+  return 0;
+}
+
+static bool ShouldTraceLoopSetupStore(A64Emitter& e, const Instr* i,
+                                      uint64_t offset) {
+  if (e.current_guest_function() != kTrackedContextGuestFunction ||
+      offset != kTrackedContextOffsetR28) {
+    return false;
+  }
+  auto src = i->src2.value;
+  if (!src || !src->def ||
+      src->def->GetOpcodeNum() != OPCODE_LOAD_CONTEXT) {
+    return false;
+  }
+  return src->def->src1.offset == offsetof(ppc::PPCContext, r[11]);
+}
+
+static void MaybeEmitTrackedLoopSetup(A64Emitter& e, GReg count_reg) {
+  auto backend = static_cast<A64Backend*>(e.backend());
+  e.MovImm64(X0, reinterpret_cast<uint64_t>(&A64LogTrackedLoopSetup));
+  if (count_reg != X1) {
+    e.asm_().ORR(X1, count_reg, count_reg);
+  }
+  e.asm_().MOVZ(X2, 0);
+  e.MovImm64(kScratch0,
+             reinterpret_cast<uint64_t>(backend->guest_to_host_thunk()));
+  e.asm_().BLR(kScratch0);
+}
+
+extern "C" uint64_t A64LogTrackedCountField(void* raw_context, uint64_t stage,
+                                            uint64_t value) {
+  auto* guest_context = reinterpret_cast<ppc::PPCContext_s*>(raw_context);
+  const uint32_t r11 = static_cast<uint32_t>(guest_context->r[11]);
+  uint32_t mem_raw = 0;
+  uint32_t mem_swapped = 0;
+  if (auto* ptr = guest_context->TranslateVirtual<const uint32_t*>(r11 + 384)) {
+    mem_raw = *ptr;
+    mem_swapped = xe::byte_swap(mem_raw);
+  }
+  XELOGI(
+      "ARM64: count-field guest={:08X} stage={} value={:08X} r11={:08X} "
+      "mem_raw={:08X} mem_swapped={:08X} lr={:08X}",
+      kTrackedContextGuestFunction,
+      stage == kTrackedCountFieldStageRawLoad ? "raw" : "swap",
+      static_cast<uint32_t>(value), r11, mem_raw, mem_swapped,
+      static_cast<uint32_t>(guest_context->lr));
+  return 0;
+}
+
+static bool ShouldTraceCountFieldLoadOffset(A64Emitter& e, const Instr* i) {
+  if (e.current_guest_function() != kTrackedContextGuestFunction ||
+      i->dest->type != INT32_TYPE || !i->src2.value ||
+      !VALUE_IS_CONSTANT(i->src2.value) ||
+      i->src2.value->constant.u64 != 384) {
+    return false;
+  }
+  return true;
+}
+
+static bool ShouldTraceCountFieldByteSwap(A64Emitter& e, const Instr* i) {
+  if (e.current_guest_function() != kTrackedContextGuestFunction ||
+      !i->src1.value || !i->src1.value->def ||
+      i->src1.value->def->GetOpcodeNum() != OPCODE_LOAD_OFFSET) {
+    return false;
+  }
+  auto* load = i->src1.value->def;
+  if (!load->src2.value || !VALUE_IS_CONSTANT(load->src2.value) ||
+      load->src2.value->constant.u64 != 384) {
+    return false;
+  }
+  return true;
+}
+
+static void MaybeEmitTrackedCountField(A64Emitter& e, uint64_t stage,
+                                       GReg value_reg) {
+  auto backend = static_cast<A64Backend*>(e.backend());
+  e.MovImm64(X0, reinterpret_cast<uint64_t>(&A64LogTrackedCountField));
+  e.MovImm64(X1, stage);
+  if (value_reg != X2) {
+    e.asm_().ORR(X2, value_reg, value_reg);
+  }
+  e.MovImm64(kScratch0,
+             reinterpret_cast<uint64_t>(backend->guest_to_host_thunk()));
+  e.asm_().BLR(kScratch0);
 }
 
 static bool ShouldSkipConditionalOp(const Value* cond) {
@@ -915,7 +1124,10 @@ static bool EmitLoadContext(A64Emitter& e, const Instr* i) {
     case INT8_TYPE:  e.asm_().LDRB(GR(dest), ctx, (int32_t)offset); break;
     case INT16_TYPE: e.asm_().LDRH(GR(dest), ctx, (int32_t)offset); break;
     case INT32_TYPE: e.asm_().LDRw(GR(dest), ctx, (int32_t)offset); break;
-    case INT64_TYPE: e.asm_().LDR(GR(dest), ctx, (int32_t)offset); break;
+    case INT64_TYPE:
+      e.asm_().LDR(GR(dest), ctx, (int32_t)offset);
+      MaybeEmitTrackedContextAccess(e, offset, GR(dest), false);
+      break;
     case FLOAT32_TYPE: e.asm_().LDR_S(VR(dest), ctx, (int32_t)offset); break;
     case FLOAT64_TYPE: e.asm_().LDR_D(VR(dest), ctx, (int32_t)offset); break;
     case VEC128_TYPE:  e.asm_().LDR_Q(VR(dest), ctx, (int32_t)offset); break;
@@ -943,7 +1155,12 @@ static bool EmitStoreContext(A64Emitter& e, const Instr* i) {
         e.asm_().STRw(kScratch0, ctx, (int32_t)offset); break;
       case INT64_TYPE:
         e.MovImm64(kScratch0, src->constant.i64);
-        e.asm_().STR(kScratch0, ctx, (int32_t)offset); break;
+        e.asm_().STR(kScratch0, ctx, (int32_t)offset);
+        MaybeEmitTrackedContextAccess(e, offset, kScratch0, true);
+        if (ShouldTraceLoopSetupStore(e, i, offset)) {
+          MaybeEmitTrackedLoopSetup(e, kScratch0);
+        }
+        break;
       case FLOAT32_TYPE:
         e.MovImm64(kScratch0, (uint64_t)src->constant.u32);
         e.asm_().STRw(kScratch0, ctx, (int32_t)offset); break;
@@ -960,7 +1177,13 @@ static bool EmitStoreContext(A64Emitter& e, const Instr* i) {
       case INT8_TYPE:  e.asm_().STRB(GR(src), ctx, (int32_t)offset); break;
       case INT16_TYPE: e.asm_().STRH(GR(src), ctx, (int32_t)offset); break;
       case INT32_TYPE: e.asm_().STRw(GR(src), ctx, (int32_t)offset); break;
-      case INT64_TYPE: e.asm_().STR(GR(src), ctx, (int32_t)offset); break;
+      case INT64_TYPE:
+        e.asm_().STR(GR(src), ctx, (int32_t)offset);
+        MaybeEmitTrackedContextAccess(e, offset, GR(src), true);
+        if (ShouldTraceLoopSetupStore(e, i, offset)) {
+          MaybeEmitTrackedLoopSetup(e, GR(src));
+        }
+        break;
       case FLOAT32_TYPE: e.asm_().STR_S(VR(src), ctx, (int32_t)offset); break;
       case FLOAT64_TYPE: e.asm_().STR_D(VR(src), ctx, (int32_t)offset); break;
       case VEC128_TYPE:  e.asm_().STR_Q(VR(src), ctx, (int32_t)offset); break;
@@ -1347,6 +1570,10 @@ static bool EmitLoadOffset(A64Emitter& e, const Instr* i) {
       break;
     case INT32_TYPE:
       e.asm_().LDRw(GR(dest), host_addr);
+      if (ShouldTraceCountFieldLoadOffset(e, i)) {
+        MaybeEmitTrackedCountField(e, kTrackedCountFieldStageRawLoad,
+                                   GR(dest));
+      }
       break;
     case INT64_TYPE:
       e.asm_().LDR(GR(dest), host_addr);
@@ -1849,7 +2076,12 @@ static bool EmitByteSwap(A64Emitter& e, const Instr* i) {
   GReg rs = LoadGPR(e, i->src1.value, kScratch0);
   switch (i->src1.value->type) {
     case INT16_TYPE: e.asm_().REV16(rd, rs); break;
-    case INT32_TYPE: e.asm_().REVw(rd, rs); break;
+    case INT32_TYPE:
+      e.asm_().REVw(rd, rs);
+      if (ShouldTraceCountFieldByteSwap(e, i)) {
+        MaybeEmitTrackedCountField(e, kTrackedCountFieldStageByteSwap, rd);
+      }
+      break;
     case INT64_TYPE: e.asm_().REV(rd, rs); break;
     default: e.asm_().MOV(rd, rs); break;
   }

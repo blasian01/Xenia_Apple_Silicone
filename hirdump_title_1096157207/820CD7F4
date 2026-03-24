@@ -1,0 +1,15 @@
+<entry>:
+label0:
+  v0.f64<vec0> = load_context +328
+  v1.f32<vec0> = convert.4 v0.f64<vec0>
+  v2.f64<vec0> = convert v1.f32<vec0>
+  v22.i32<gpr0> = load_context +32
+  v24.i32<gpr0> = and v22.i32<gpr0>, -60000001
+  v27.f64<vec1> = load_context +512
+  v28.f64<vec2> = load_context +560
+  v29.f64<vec0> = mul_sub v2.f64<vec0>, v27.f64<vec1>, v28.f64<vec2>
+  v30.f64<vec0> = to_single v29.f64<vec0>
+  store_context +320, v30.f64<vec0>
+  store_context +32, v24.i32<gpr0>
+  context_barrier
+  call.2 <fn>

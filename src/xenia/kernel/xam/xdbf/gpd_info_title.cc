@@ -8,16 +8,88 @@
  */
 
 #include "xenia/kernel/xam/xdbf/gpd_info_title.h"
+
+#include <cstring>
 #include <ranges>
 
 namespace xe {
 namespace kernel {
 namespace xam {
 
+namespace {
+
+constexpr size_t kAchievementHeaderSize = sizeof(X_XDBF_GPD_ACHIEVEMENT);
+
+bool GetAchievementStringOffset(const Entry* entry, size_t string_index,
+                                size_t* out_offset) {
+  if (!entry || entry->data.size() < kAchievementHeaderSize) {
+    return false;
+  }
+
+  size_t offset = kAchievementHeaderSize;
+  for (size_t string_i = 0; string_i < string_index; ++string_i) {
+    if (offset >= entry->data.size()) {
+      return false;
+    }
+
+    const size_t remaining_bytes = entry->data.size() - offset;
+    const size_t max_chars = remaining_bytes / sizeof(char16_t);
+    bool found_terminator = false;
+    for (size_t char_i = 0; char_i < max_chars; ++char_i) {
+      uint16_t raw_char = 0;
+      std::memcpy(&raw_char, entry->data.data() + offset +
+                                 char_i * sizeof(char16_t),
+                  sizeof(raw_char));
+      if (xe::byte_swap(raw_char) == 0) {
+        offset += (char_i + 1) * sizeof(char16_t);
+        found_terminator = true;
+        break;
+      }
+    }
+    if (!found_terminator) {
+      return false;
+    }
+  }
+
+  if (offset > entry->data.size()) {
+    return false;
+  }
+
+  *out_offset = offset;
+  return true;
+}
+
+std::u16string ReadAchievementString(const Entry* entry, size_t offset) {
+  if (!entry || offset >= entry->data.size()) {
+    return {};
+  }
+
+  const size_t remaining_bytes = entry->data.size() - offset;
+  const size_t max_chars = remaining_bytes / sizeof(char16_t);
+  std::u16string result;
+  result.reserve(max_chars);
+
+  for (size_t char_i = 0; char_i < max_chars; ++char_i) {
+    uint16_t raw_char = 0;
+    std::memcpy(&raw_char, entry->data.data() + offset +
+                               char_i * sizeof(char16_t),
+                sizeof(raw_char));
+    char16_t swapped_char = static_cast<char16_t>(xe::byte_swap(raw_char));
+    if (swapped_char == 0) {
+      return result;
+    }
+    result.push_back(swapped_char);
+  }
+
+  return {};
+}
+
+}  // namespace
+
 X_XDBF_GPD_ACHIEVEMENT* GpdInfoTitle::GetAchievementEntry(const uint32_t id) {
   Entry* entry = GetEntry(static_cast<uint16_t>(GpdSection::kAchievement), id);
 
-  if (!entry) {
+  if (!entry || entry->data.size() < kAchievementHeaderSize) {
     return nullptr;
   }
 
@@ -25,65 +97,65 @@ X_XDBF_GPD_ACHIEVEMENT* GpdInfoTitle::GetAchievementEntry(const uint32_t id) {
 }
 
 const char16_t* GpdInfoTitle::GetAchievementTitlePtr(const uint32_t id) {
-  X_XDBF_GPD_ACHIEVEMENT* achievement_ptr = GetAchievementEntry(id);
-  if (!achievement_ptr) {
+  const Entry* entry =
+      GetEntry(static_cast<uint16_t>(GpdSection::kAchievement), id);
+  size_t offset = 0;
+  if (!GetAchievementStringOffset(entry, 0, &offset)) {
     return nullptr;
   }
-
-  return reinterpret_cast<const char16_t*>(++achievement_ptr);
+  return reinterpret_cast<const char16_t*>(entry->data.data() + offset);
 }
 
 const char16_t* GpdInfoTitle::GetAchievementDescriptionPtr(const uint32_t id) {
-  // We need to get ptr to first string. These are one after another in memory.
-  const char16_t* title_ptr = GetAchievementTitlePtr(id);
-  if (!title_ptr) {
+  const Entry* entry =
+      GetEntry(static_cast<uint16_t>(GpdSection::kAchievement), id);
+  size_t offset = 0;
+  if (!GetAchievementStringOffset(entry, 1, &offset)) {
     return nullptr;
   }
-
-  return reinterpret_cast<const char16_t*>(
-      title_ptr + GetAchievementTitle(id).length() + 1);
+  return reinterpret_cast<const char16_t*>(entry->data.data() + offset);
 }
 
 const char16_t* GpdInfoTitle::GetAchievementUnachievedDescriptionPtr(
     const uint32_t id) {
-  const char16_t* title_ptr = GetAchievementDescriptionPtr(id);
-  if (!title_ptr) {
+  const Entry* entry =
+      GetEntry(static_cast<uint16_t>(GpdSection::kAchievement), id);
+  size_t offset = 0;
+  if (!GetAchievementStringOffset(entry, 2, &offset)) {
     return nullptr;
   }
-
-  return reinterpret_cast<const char16_t*>(
-      title_ptr + GetAchievementDescription(id).length() + 1);
+  return reinterpret_cast<const char16_t*>(entry->data.data() + offset);
 }
 
 std::u16string GpdInfoTitle::GetAchievementTitle(const uint32_t id) {
-  auto title_ptr = GetAchievementTitlePtr(id);
-
-  if (!title_ptr) {
-    return std::u16string();
+  const Entry* entry =
+      GetEntry(static_cast<uint16_t>(GpdSection::kAchievement), id);
+  size_t offset = 0;
+  if (!GetAchievementStringOffset(entry, 0, &offset)) {
+    return {};
   }
-
-  return string_util::read_u16string_and_swap(title_ptr);
+  return ReadAchievementString(entry, offset);
 }
 
 std::u16string GpdInfoTitle::GetAchievementDescription(const uint32_t id) {
-  auto description_ptr = GetAchievementDescriptionPtr(id);
-
-  if (!description_ptr) {
-    return std::u16string();
+  const Entry* entry =
+      GetEntry(static_cast<uint16_t>(GpdSection::kAchievement), id);
+  size_t offset = 0;
+  if (!GetAchievementStringOffset(entry, 1, &offset)) {
+    return {};
   }
-
-  return string_util::read_u16string_and_swap(description_ptr);
+  return ReadAchievementString(entry, offset);
 }
 
 std::u16string GpdInfoTitle::GetAchievementUnachievedDescription(
     const uint32_t id) {
-  auto description_ptr = GetAchievementUnachievedDescriptionPtr(id);
-
-  if (!description_ptr) {
-    return std::u16string();
+  const Entry* entry =
+      GetEntry(static_cast<uint16_t>(GpdSection::kAchievement), id);
+  size_t offset = 0;
+  if (!GetAchievementStringOffset(entry, 2, &offset)) {
+    return {};
   }
-
-  return string_util::read_u16string_and_swap(description_ptr);
+  return ReadAchievementString(entry, offset);
 }
 
 std::vector<uint32_t> GpdInfoTitle::GetAchievementsIds() const {

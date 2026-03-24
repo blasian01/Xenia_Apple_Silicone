@@ -1,0 +1,64 @@
+<entry>:
+label0:
+  ; out: label1, dom:0, uncond:1
+  context_barrier
+  set_return_address 8239047C
+  store_context +304, 8239047C
+  call <fn>
+  store_context +128, -7DFA0000
+  store_context +288, 2
+  v5.i64<gpr0> = load_context +280
+  v6.i64<gpr0> = sub v5.i64<gpr0>, 10
+  store_context +272, v6.i64<gpr0>
+  store_context +264, -7DFA7D40
+label1:
+  ; in: label0, dom:0, uncond:1
+  ; in: label1, dom:0, uncond:0
+  ; out: label1, dom:0, uncond:0
+  v10.i64<gpr0> = load_context +264
+  store_context +72, v10.i64<gpr0>
+  v11.i64<gpr0> = load_context +280
+  v13.i32<gpr0> = load_offset v11.i64<gpr0>, 20
+  v14.i32<gpr0> = byte_swap v13.i32<gpr0>
+  v15.i64<gpr0> = zero_extend v14.i32<gpr0>
+  store_context +64, v15.i64<gpr0>
+  context_barrier
+  set_return_address 82390498
+  store_context +304, 82390498
+  call <fn>
+  v18.i64<gpr0> = load_context +288
+  v21.i64<gpr1> = sub v18.i64<gpr0>, 1
+  store_context +288, v21.i64<gpr1>
+  v24.i32<gpr0> = truncate v18.i64<gpr0>
+  v25.i32<gpr0> = not v24.i32<gpr0>
+  v26.i8<gpr0> = compare_ugt -1, v25.i32<gpr0>
+  store_context +2640, v26.i8<gpr0>
+  v27.i32<gpr0> = truncate v21.i64<gpr1>
+  v29.i8<gpr1> = compare_slt v27.i32<gpr0>, 0
+  store_context +0, v29.i8<gpr1>
+  v30.i8<gpr1> = compare_sgt v27.i32<gpr0>, 0
+  store_context +1, v30.i8<gpr1>
+  v31.i8<gpr0> = compare_eq v27.i32<gpr0>, 0
+  store_context +2, v31.i8<gpr0>
+  v32.i64<gpr1> = load_context +272
+  v34.i64<gpr1> = add v32.i64<gpr1>, 10
+  v35.i64<gpr2> = load_context +64
+  v36.i32<gpr2> = truncate v35.i64<gpr2>
+  v37.i32<gpr2> = byte_swap v36.i32<gpr2>
+  store v34.i64<gpr1>, v37.i32<gpr2>
+  store_context +272, v34.i64<gpr1>
+  context_barrier
+  branch_false v31.i8<gpr0>, label1
+  context_barrier
+  set_return_address 823904A8
+  store_context +304, 823904A8
+  call <fn>
+  context_barrier
+  set_return_address 823904AC
+  store_context +304, 823904AC
+  call <fn>
+  v45.i64<gpr0> = load_context +48
+  v46.i64<gpr0> = add v45.i64<gpr0>, 80
+  store_context +48, v46.i64<gpr0>
+  context_barrier
+  call.2 __restgprlr_28

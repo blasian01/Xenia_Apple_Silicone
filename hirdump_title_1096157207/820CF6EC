@@ -1,0 +1,48 @@
+<entry>:
+label0:
+  v0.i64<gpr0> = load_context +288
+  v2.i32<gpr1> = load_offset v0.i64<gpr0>, 5428
+  v3.i32<gpr1> = byte_swap v2.i32<gpr1>
+  v4.i64<gpr1> = zero_extend v3.i32<gpr1>
+  store_context +128, v4.i64<gpr1>
+  v7.i32<gpr0> = load_offset v0.i64<gpr0>, 542C
+  v8.i32<gpr0> = byte_swap v7.i32<gpr0>
+  v9.i64<gpr0> = zero_extend v8.i32<gpr0>
+  store_context +120, v9.i64<gpr0>
+  v11.i64<gpr2> = load_context +48
+  v12.i64<gpr3> = add v11.i64<gpr2>, 98
+  store_context +64, v12.i64<gpr3>
+  v15.i64<gpr3> = add v11.i64<gpr2>, 50
+  store_context +72, v15.i64<gpr3>
+  v18.i64<gpr3> = load_context +280
+  v19.i16<gpr3> = truncate v18.i64<gpr3>
+  v20.i16<gpr3> = byte_swap v19.i16<gpr3>
+  store_offset v11.i64<gpr2>, 90, v20.i16<gpr3>
+  store_context +80, 38
+  v24.i64<gpr3> = load_context +272
+  v25.i16<gpr3> = truncate v24.i64<gpr3>
+  v26.i16<gpr3> = byte_swap v25.i16<gpr3>
+  store_offset v11.i64<gpr2>, 92, v26.i16<gpr3>
+  v30.i16<gpr1> = truncate v4.i64<gpr1>
+  v31.i16<gpr1> = byte_swap v30.i16<gpr1>
+  store_offset v11.i64<gpr2>, 94, v31.i16<gpr1>
+  v35.i16<gpr0> = truncate v9.i64<gpr0>
+  v36.i16<gpr0> = byte_swap v35.i16<gpr0>
+  store_offset v11.i64<gpr2>, 96, v36.i16<gpr0>
+  context_barrier
+  set_return_address 820CF714
+  store_context +304, 820CF714
+  call <fn>
+  v40.i64<gpr0> = load_context +48
+  v41.i64<gpr0> = add v40.i64<gpr0>, 90
+  store_context +72, v41.i64<gpr0>
+  store_context +64, 1
+  context_barrier
+  set_return_address 820CF720
+  store_context +304, 820CF720
+  call VdCallGraphicsNotificationRoutines
+  v46.i64<gpr0> = load_context +48
+  v47.i64<gpr0> = add v46.i64<gpr0>, 100
+  store_context +48, v47.i64<gpr0>
+  context_barrier
+  call.2 __restgprlr_28

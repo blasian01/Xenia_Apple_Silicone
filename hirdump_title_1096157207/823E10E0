@@ -1,0 +1,9 @@
+<entry>:
+label0:
+  store_context +128, -7DBE0000
+  v2.i64<gpr0> = load_context +128
+  v3.i64<gpr0> = sub v2.i64<gpr0>, 468
+  store_context +64, v3.i64<gpr0>
+  context_barrier
+  v4.i64<gpr0> = load_context +304
+  call_indirect.6 v4.i64<gpr0>

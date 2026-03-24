@@ -1,0 +1,51 @@
+<entry>:
+label0:
+  store_context +80, 10000
+  store_context +72, 10000
+  store_context +64, 10000
+  store_context +128, 10000
+  v11.f64<vec0> = convert 1.000000
+  store_context +320, v11.f64<vec0>
+  store_context +120, -7DFC0818
+  store_context +112, 19310
+  store_context +104, 19314
+  store_context +96, 19318
+  store_context +88, 1931C
+  v33.f64<vec1> = convert 1.000000
+  store_context +424, v33.f64<vec1>
+  v40.f64<vec2> = convert 1.000000
+  store_context +416, v40.f64<vec2>
+  v47.f64<vec3> = convert 1.000000
+  store_context +408, v47.f64<vec3>
+  v48.i64<gpr0> = load_context +280
+  v50.i64<gpr1> = add v48.i64<gpr0>, 19310
+  v52.f32<vec0> = convert v11.f64<vec0>
+  v53.i32<gpr2> = cast v52.f32<vec0>
+  v54.i32<gpr2> = byte_swap v53.i32<gpr2>
+  store v50.i64<gpr1>, v54.i32<gpr2>
+  v57.i64<gpr1> = add v48.i64<gpr0>, 19314
+  v59.f32<vec0> = convert v33.f64<vec1>
+  v60.i32<gpr2> = cast v59.f32<vec0>
+  v61.i32<gpr2> = byte_swap v60.i32<gpr2>
+  store v57.i64<gpr1>, v61.i32<gpr2>
+  v64.i64<gpr1> = add v48.i64<gpr0>, 19318
+  v66.f32<vec0> = convert v40.f64<vec2>
+  v67.i32<gpr2> = cast v66.f32<vec0>
+  v68.i32<gpr2> = byte_swap v67.i32<gpr2>
+  store v64.i64<gpr1>, v68.i32<gpr2>
+  v71.i64<gpr0> = add v48.i64<gpr0>, 1931C
+  v73.f32<vec0> = convert v47.f64<vec3>
+  v74.i32<gpr1> = cast v73.f32<vec0>
+  v75.i32<gpr1> = byte_swap v74.i32<gpr1>
+  store v71.i64<gpr0>, v75.i32<gpr1>
+  v77.i64<gpr0> = load_context +48
+  v78.i64<gpr0> = add v77.i64<gpr0>, 150
+  store_context +48, v78.i64<gpr0>
+  v81.i64<gpr0> = sub v78.i64<gpr0>, 98
+  store_context +136, v81.i64<gpr0>
+  context_barrier
+  set_return_address 82123518
+  store_context +304, 82123518
+  call __restfpr_23
+  context_barrier
+  call.2 __restgprlr_14

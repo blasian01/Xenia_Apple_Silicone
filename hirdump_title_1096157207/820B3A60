@@ -1,0 +1,61 @@
+<entry>:
+label0:
+  v0.f64<vec0> = load_context +328
+  v1.f32<vec0> = convert.4 v0.f64<vec0>
+  v2.f64<vec0> = convert v1.f32<vec0>
+  v22.i32<gpr0> = load_context +32
+  v24.i32<gpr0> = and v22.i32<gpr0>, -60000001
+  v26.i64<gpr1> = load_context +288
+  v28.i64<gpr2> = add v26.i64<gpr1>, A8
+  v29.i64<gpr2> = load v28.i64<gpr2>
+  v30.i64<gpr2> = byte_swap v29.i64<gpr2>
+  v31.f64<vec1> = cast v30.i64<gpr2>
+  v32.f64<vec2> = load_context +568
+  v34.f64<vec3> = mul v32.f64<vec2>, v32.f64<vec2>
+  v35.f64<vec3> = to_single v34.f64<vec3>
+  v61.i64<gpr1> = add v26.i64<gpr1>, B8
+  v62.i64<gpr1> = load v61.i64<gpr1>
+  v63.i64<gpr1> = byte_swap v62.i64<gpr1>
+  v64.f64<vec4> = cast v63.i64<gpr1>
+  v67.f64<vec5> = sub v31.f64<vec1>, v32.f64<vec2>
+  store_context +400, v67.f64<vec5>
+  v93.f64<vec6> = mul v2.f64<vec0>, v2.f64<vec0>
+  v94.f64<vec6> = to_single v93.f64<vec6>
+  store_context +392, v94.f64<vec6>
+  v120.f64<vec7> = sub v31.f64<vec1>, v2.f64<vec0>
+  store_context +384, v120.f64<vec7>
+  v146.f64<vec0> = mul v2.f64<vec0>, v32.f64<vec2>
+  v147.f64<vec0> = to_single v146.f64<vec0>
+  store_context +376, v147.f64<vec0>
+  v172.f32<vec5> = convert.4 v67.f64<vec5>
+  v173.f64<vec5> = convert v172.f32<vec5>
+  store_context +368, v173.f64<vec5>
+  v199.f64<vec6> = sub v31.f64<vec1>, v94.f64<vec6>
+  store_context +360, v199.f64<vec6>
+  v225.f64<vec2> = mul v120.f64<vec7>, v32.f64<vec2>
+  store_context +352, v225.f64<vec2>
+  v251.f64<vec0> = sub v31.f64<vec1>, v147.f64<vec0>
+  store_context +344, v251.f64<vec0>
+  v277.f64<vec1> = mul v199.f64<vec6>, v35.f64<vec3>
+  store_context +336, v277.f64<vec1>
+  v304.f64<vec1> = mul_sub v225.f64<vec2>, v64.f64<vec4>, v277.f64<vec1>
+  store_context +328, v304.f64<vec1>
+  v329.f64<vec1> = sqrt v304.f64<vec1>
+  store_context +320, v329.f64<vec1>
+  v355.f64<vec0> = sub v251.f64<vec0>, v329.f64<vec1>
+  store_context +424, v355.f64<vec0>
+  v380.f32<vec0> = convert.4 v355.f64<vec0>
+  v381.f64<vec0> = convert v380.f32<vec0>
+  store_context +416, v381.f64<vec0>
+  v407.f64<vec0> = div v381.f64<vec0>, v173.f64<vec5>
+  v408.f64<vec0> = to_single v407.f64<vec0>
+  store_context +408, v408.f64<vec0>
+  store_context +32, v24.i32<gpr0>
+  v432.i64<gpr0> = load_context +280
+  v434.i64<gpr0> = add v432.i64<gpr0>, 1C
+  v436.f32<vec0> = convert v408.f64<vec0>
+  v437.i32<gpr1> = cast v436.f32<vec0>
+  v438.i32<gpr1> = byte_swap v437.i32<gpr1>
+  store v434.i64<gpr0>, v438.i32<gpr1>
+  context_barrier
+  call.2 <fn>
