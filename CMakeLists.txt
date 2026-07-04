@@ -167,20 +167,16 @@ else()
       $<$<COMPILE_LANGUAGE:CXX>:-Wno-deprecated-enum-enum-conversion>
     )
 
-    # Check Clang version for newer warnings
-    if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
-      if(CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 20)
-        add_compile_options(
-          $<$<COMPILE_LANGUAGE:CXX>:-Wno-deprecated-literal-operator>
-          $<$<COMPILE_LANGUAGE:CXX>:-Wno-nontrivial-memcall>
-        )
-      endif()
-      if(CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 21)
-        add_compile_options(
-          $<$<COMPILE_LANGUAGE:CXX>:-Wno-character-conversion>
-        )
-      endif()
-    endif()
+    # Newer-Clang warning suppressions. Applied unconditionally with
+    # -Wno-unknown-warning-option so older Clang/AppleClang ignores the ones
+    # it doesn't know (version gates break when the CMake cache predates an
+    # Xcode update).
+    add_compile_options(
+      $<$<COMPILE_LANGUAGE:CXX>:-Wno-unknown-warning-option>
+      $<$<COMPILE_LANGUAGE:CXX>:-Wno-deprecated-literal-operator>
+      $<$<COMPILE_LANGUAGE:CXX>:-Wno-nontrivial-memcall>
+      $<$<COMPILE_LANGUAGE:CXX>:-Wno-character-conversion>
+    )
   elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     # GCC-specific
     add_compile_options(

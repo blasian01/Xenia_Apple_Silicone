@@ -19,7 +19,7 @@
 #include "xenia/ui/window_mac.h"
 #include "xenia/ui/windowed_app_context_mac.h"
 
-extern "C" int main(int argc, char** argv) {
+int main(int argc, char** argv) {
   int result;
 
   {

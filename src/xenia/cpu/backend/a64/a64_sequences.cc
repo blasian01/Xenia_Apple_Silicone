@@ -7,6 +7,7 @@
 #include <cstring>
 
 #include "xenia/base/logging.h"
+#include "xenia/base/math.h"
 #include "xenia/cpu/backend/a64/a64_backend.h"
 #include "xenia/cpu/backend/a64/a64_emitter.h"
 #include "xenia/cpu/backend/a64/a64_function.h"
@@ -219,6 +220,123 @@ static GReg ComputeHostAddress(A64Emitter& e, const Value* guest_address,
 
   e.asm_().ADD(host_addr, kMembaseReg, host_addr);
   return host_addr;
+}
+
+// Loads a v128 operand into a register, materializing constants into the
+// given scratch.
+static VReg LoadVec128(A64Emitter& e, const Value* v, VReg scratch) {
+  if (VALUE_IS_CONSTANT(v)) {
+    e.LoadConstantV128(scratch, v->constant.v128);
+    return scratch;
+  }
+  return VR(v);
+}
+
+static const vec128_t kByteSwapMaskVec128 =
+    vec128b(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+
+static void EmitByteSwapVector128(A64Emitter& e, VReg dest, VReg src) {
+  e.LoadConstantV128(kVScratch2, kByteSwapMaskVec128);
+  e.asm_().TBL(dest, src, kVScratch2);
+}
+
+static void EmitLoadFloat32Memory(A64Emitter& e, VReg dest, GReg host_addr,
+                                  bool byte_swap) {
+  if (!byte_swap) {
+    e.asm_().LDR_S(dest, host_addr);
+    return;
+  }
+  e.asm_().LDRw(kScratch1, host_addr);
+  e.asm_().REVw(kScratch1, kScratch1);
+  e.asm_().FMOV_SW(dest, kScratch1);
+}
+
+static void EmitLoadFloat64Memory(A64Emitter& e, VReg dest, GReg host_addr,
+                                  bool byte_swap) {
+  if (!byte_swap) {
+    e.asm_().LDR_D(dest, host_addr);
+    return;
+  }
+  e.asm_().LDR(kScratch1, host_addr);
+  e.asm_().REV(kScratch1, kScratch1);
+  e.asm_().FMOV_DX(dest, kScratch1);
+}
+
+static void EmitLoadVector128Memory(A64Emitter& e, VReg dest, GReg host_addr,
+                                    bool byte_swap) {
+  e.asm_().LDR_Q(dest, host_addr);
+  if (byte_swap) {
+    EmitByteSwapVector128(e, dest, dest);
+  }
+}
+
+static void EmitStoreHalfWordMemory(A64Emitter& e, GReg host_addr, GReg value,
+                                    bool byte_swap) {
+  GReg store_reg = value;
+  if (byte_swap) {
+    if (store_reg != kScratch2) {
+      e.asm_().MOVw(kScratch2, store_reg);
+      store_reg = kScratch2;
+    }
+    e.asm_().REV16(store_reg, store_reg);
+  }
+  e.asm_().STRH(store_reg, host_addr);
+}
+
+static void EmitStoreWordMemory(A64Emitter& e, GReg host_addr, GReg value,
+                                bool byte_swap) {
+  GReg store_reg = value;
+  if (byte_swap) {
+    if (store_reg != kScratch2) {
+      e.asm_().MOVw(kScratch2, store_reg);
+      store_reg = kScratch2;
+    }
+    e.asm_().REVw(store_reg, store_reg);
+  }
+  e.asm_().STRw(store_reg, host_addr);
+}
+
+static void EmitStoreDoubleWordMemory(A64Emitter& e, GReg host_addr,
+                                      GReg value, bool byte_swap) {
+  GReg store_reg = value;
+  if (byte_swap) {
+    if (store_reg != kScratch2) {
+      e.asm_().MOV(kScratch2, store_reg);
+      store_reg = kScratch2;
+    }
+    e.asm_().REV(store_reg, store_reg);
+  }
+  e.asm_().STR(store_reg, host_addr);
+}
+
+static void EmitStoreFloat32Memory(A64Emitter& e, GReg host_addr, GReg value,
+                                   bool byte_swap) {
+  EmitStoreWordMemory(e, host_addr, value, byte_swap);
+}
+
+static void EmitStoreFloat64Memory(A64Emitter& e, GReg host_addr, GReg value,
+                                   bool byte_swap) {
+  EmitStoreDoubleWordMemory(e, host_addr, value, byte_swap);
+}
+
+static void EmitStoreVector128Memory(A64Emitter& e, GReg host_addr, VReg value,
+                                     bool byte_swap) {
+  GReg preserved_host_addr = host_addr;
+  if (byte_swap &&
+      (preserved_host_addr == kScratch0 || preserved_host_addr == kScratch1)) {
+    e.asm_().MOV(kScratch2, preserved_host_addr);
+    preserved_host_addr = kScratch2;
+  }
+
+  VReg store_reg = value;
+  if (byte_swap) {
+    if (store_reg != kVScratch0) {
+      e.asm_().MOV_16B(kVScratch0, store_reg);
+      store_reg = kVScratch0;
+    }
+    EmitByteSwapVector128(e, store_reg, store_reg);
+  }
+  e.asm_().STR_Q(store_reg, preserved_host_addr);
 }
 
 extern "C" uint64_t A64UndefinedCallExtern(void* raw_context,
@@ -437,6 +555,168 @@ extern "C" uint64_t A64StoreVectorRight(void* raw_context,
           std::memcpy(host_ptr, scratch + (16 - eb), eb);
         }
       });
+}
+
+// Whole-vector bit shifts (PPC vsl/vsr). The value is exchanged through
+// helper_scratch; the shift amount (0-7 bits) arrives in arg0. Semantics
+// mirror the x64 backend's EmulateShlV128/EmulateShrV128, including the ^3
+// byte swizzle of the guest vector layout.
+extern "C" uint64_t A64ShlV128(void* raw_context, uint64_t shamt,
+                               uint64_t unused) {
+  auto* backend_context = A64GetBackendContext(raw_context);
+  auto* value = reinterpret_cast<vec128_t*>(backend_context->helper_scratch);
+  const uint32_t n = static_cast<uint32_t>(shamt) & 0x7;
+  vec128_t v = *value;
+  for (int idx = 0; idx < 15; ++idx) {
+    v.u8[idx ^ 0x3] = static_cast<uint8_t>(
+        (v.u8[idx ^ 0x3] << n) | (v.u8[(idx + 1) ^ 0x3] >> (8 - n)));
+  }
+  v.u8[15 ^ 0x3] = static_cast<uint8_t>(v.u8[15 ^ 0x3] << n);
+  *value = v;
+  return 0;
+}
+
+extern "C" uint64_t A64ShrV128(void* raw_context, uint64_t shamt,
+                               uint64_t unused) {
+  auto* backend_context = A64GetBackendContext(raw_context);
+  auto* value = reinterpret_cast<vec128_t*>(backend_context->helper_scratch);
+  const uint32_t n = static_cast<uint32_t>(shamt) & 0x7;
+  vec128_t v = *value;
+  for (int idx = 15; idx > 0; --idx) {
+    v.u8[idx ^ 0x3] = static_cast<uint8_t>(
+        (v.u8[idx ^ 0x3] >> n) | (v.u8[(idx - 1) ^ 0x3] << (8 - n)));
+  }
+  v.u8[0 ^ 0x3] = static_cast<uint8_t>(v.u8[0 ^ 0x3] >> n);
+  *value = v;
+  return 0;
+}
+
+// PACK/UNPACK conversions exchanged through helper_scratch. Semantics match
+// the x64 backend's emulation paths (see x64_seq_vector.cc) and the
+// expectations in src/xenia/cpu/testing/{pack,unpack}_test.cc.
+extern "C" uint64_t A64PackD3DCOLOR(void* raw_context, uint64_t arg0,
+                                    uint64_t arg1) {
+  auto* backend_context = A64GetBackendContext(raw_context);
+  auto* value = reinterpret_cast<vec128_t*>(backend_context->helper_scratch);
+  const vec128_t v = *value;
+  auto to_byte = [](float f) -> uint32_t {
+    // Valid inputs sit in [3.0, 3.0 + 255/256]; the packed byte is the low
+    // mantissa byte of the clamped value.
+    float lo = 3.0f;
+    uint32_t hi_bits = 0x404000FF;
+    float hi;
+    std::memcpy(&hi, &hi_bits, sizeof(hi));
+    f = std::min(std::max(f, lo), hi);
+    uint32_t bits;
+    std::memcpy(&bits, &f, sizeof(bits));
+    return bits & 0xFF;
+  };
+  vec128_t r = vec128b(0);
+  r.u32[3] = (to_byte(v.f32[3]) << 24) | (to_byte(v.f32[0]) << 16) |
+             (to_byte(v.f32[1]) << 8) | to_byte(v.f32[2]);
+  *value = r;
+  return 0;
+}
+
+extern "C" uint64_t A64UnpackD3DCOLOR(void* raw_context, uint64_t arg0,
+                                      uint64_t arg1) {
+  auto* backend_context = A64GetBackendContext(raw_context);
+  auto* value = reinterpret_cast<vec128_t*>(backend_context->helper_scratch);
+  const uint32_t t = value->u32[3];
+  vec128_t r;
+  r.u32[0] = 0x3F800000 | ((t >> 16) & 0xFF);  // R
+  r.u32[1] = 0x3F800000 | ((t >> 8) & 0xFF);   // G
+  r.u32[2] = 0x3F800000 | (t & 0xFF);          // B
+  r.u32[3] = 0x3F800000 | ((t >> 24) & 0xFF);  // A
+  *value = r;
+  return 0;
+}
+
+extern "C" uint64_t A64PackFLOAT16_2(void* raw_context, uint64_t arg0,
+                                     uint64_t arg1) {
+  auto* backend_context = A64GetBackendContext(raw_context);
+  auto* value = reinterpret_cast<vec128_t*>(backend_context->helper_scratch);
+  const vec128_t v = *value;
+  vec128_t r = vec128b(0);
+  r.u32[3] = (uint32_t(float_to_xenos_half(v.f32[0])) << 16) |
+             float_to_xenos_half(v.f32[1]);
+  *value = r;
+  return 0;
+}
+
+extern "C" uint64_t A64UnpackFLOAT16_2(void* raw_context, uint64_t arg0,
+                                       uint64_t arg1) {
+  auto* backend_context = A64GetBackendContext(raw_context);
+  auto* value = reinterpret_cast<vec128_t*>(backend_context->helper_scratch);
+  const uint32_t t = value->u32[3];
+  vec128_t r;
+  r.f32[0] = xenos_half_to_float(uint16_t(t >> 16));
+  r.f32[1] = xenos_half_to_float(uint16_t(t & 0xFFFF));
+  r.f32[2] = 0.0f;
+  r.f32[3] = 1.0f;
+  *value = r;
+  return 0;
+}
+
+extern "C" uint64_t A64PackFLOAT16_4(void* raw_context, uint64_t arg0,
+                                     uint64_t arg1) {
+  auto* backend_context = A64GetBackendContext(raw_context);
+  auto* value = reinterpret_cast<vec128_t*>(backend_context->helper_scratch);
+  const vec128_t v = *value;
+  vec128_t r = vec128b(0);
+  // Round-to-nearest-even, matching the x64 path.
+  r.u16[5] = float_to_xenos_half(v.f32[0], false, true);
+  r.u16[4] = float_to_xenos_half(v.f32[1], false, true);
+  r.u16[7] = float_to_xenos_half(v.f32[2], false, true);
+  r.u16[6] = float_to_xenos_half(v.f32[3], false, true);
+  *value = r;
+  return 0;
+}
+
+extern "C" uint64_t A64UnpackFLOAT16_4(void* raw_context, uint64_t arg0,
+                                       uint64_t arg1) {
+  auto* backend_context = A64GetBackendContext(raw_context);
+  auto* value = reinterpret_cast<vec128_t*>(backend_context->helper_scratch);
+  const vec128_t v = *value;
+  vec128_t r;
+  r.f32[0] = xenos_half_to_float(v.u16[5]);
+  r.f32[1] = xenos_half_to_float(v.u16[4]);
+  r.f32[2] = xenos_half_to_float(v.u16[7]);
+  r.f32[3] = xenos_half_to_float(v.u16[6]);
+  *value = r;
+  return 0;
+}
+
+extern "C" uint64_t A64PackSHORT_2(void* raw_context, uint64_t arg0,
+                                   uint64_t arg1) {
+  auto* backend_context = A64GetBackendContext(raw_context);
+  auto* value = reinterpret_cast<vec128_t*>(backend_context->helper_scratch);
+  const vec128_t v = *value;
+  auto to_short = [](float f) -> uint32_t {
+    // Values are pre-biased around 3.0: n = (f - 3.0) * 2^22, saturated to
+    // [-32767, 32767] (note the asymmetric lower bound, per vpkd3d).
+    double n = (double(f) - 3.0) * 4194304.0;
+    n = std::min(std::max(n, -32767.0), 32767.0);
+    return uint32_t(int32_t(std::llround(n))) & 0xFFFF;
+  };
+  vec128_t r = vec128b(0);
+  r.u32[3] = (to_short(v.f32[0]) << 16) | to_short(v.f32[1]);
+  *value = r;
+  return 0;
+}
+
+extern "C" uint64_t A64UnpackSHORT_2(void* raw_context, uint64_t arg0,
+                                     uint64_t arg1) {
+  auto* backend_context = A64GetBackendContext(raw_context);
+  auto* value = reinterpret_cast<vec128_t*>(backend_context->helper_scratch);
+  const uint32_t t = value->u32[3];
+  vec128_t r;
+  r.f32[0] = 3.0f + float(int16_t(t >> 16)) * (1.0f / 4194304.0f);
+  r.f32[1] = 3.0f + float(int16_t(t & 0xFFFF)) * (1.0f / 4194304.0f);
+  r.f32[2] = 0.0f;
+  r.f32[3] = 1.0f;
+  *value = r;
+  return 0;
 }
 
 extern "C" uint64_t A64LogPossibleGuestReturnMismatch(void* raw_context,
@@ -1202,20 +1482,27 @@ static bool EmitLoad(A64Emitter& e, const Instr* i) {
 
   GReg host_addr =
       ComputeHostAddress(e, addr, nullptr, kScratch0, kScratch1);
+  const bool byte_swap = (i->flags & LOAD_STORE_BYTE_SWAP) != 0;
 
   switch (dest->type) {
     case INT8_TYPE:  e.asm_().LDRB(GR(dest), host_addr); break;
     case INT16_TYPE: e.asm_().LDRH(GR(dest), host_addr); break;
     case INT32_TYPE: e.asm_().LDRw(GR(dest), host_addr); break;
     case INT64_TYPE: e.asm_().LDR(GR(dest), host_addr); break;
-    case FLOAT32_TYPE: e.asm_().LDR_S(VR(dest), host_addr); break;
-    case FLOAT64_TYPE: e.asm_().LDR_D(VR(dest), host_addr); break;
-    case VEC128_TYPE:  e.asm_().LDR_Q(VR(dest), host_addr); break;
+    case FLOAT32_TYPE:
+      EmitLoadFloat32Memory(e, VR(dest), host_addr, byte_swap);
+      return true;
+    case FLOAT64_TYPE:
+      EmitLoadFloat64Memory(e, VR(dest), host_addr, byte_swap);
+      return true;
+    case VEC128_TYPE:
+      EmitLoadVector128Memory(e, VR(dest), host_addr, byte_swap);
+      return true;
     default: return false;
   }
 
   // Byte swap if needed (Xbox 360 is big-endian)
-  if (i->flags & LOAD_STORE_BYTE_SWAP) {
+  if (byte_swap) {
     switch (dest->type) {
       case INT16_TYPE: e.asm_().REV16(GR(dest), GR(dest)); break;
       case INT32_TYPE: e.asm_().REVw(GR(dest), GR(dest)); break;
@@ -1233,37 +1520,69 @@ static bool EmitStore(A64Emitter& e, const Instr* i) {
 
   GReg host_addr =
       ComputeHostAddress(e, addr, nullptr, kScratch0, kScratch1);
+  const bool byte_swap = (i->flags & LOAD_STORE_BYTE_SWAP) != 0;
 
   if (VALUE_IS_CONSTANT(val)) {
-    GReg sv = kScratch1;
     switch (val->type) {
-      case INT8_TYPE:  e.asm_().MOVZ(sv, val->constant.u8); e.asm_().STRB(sv, host_addr); break;
-      case INT16_TYPE: e.asm_().MOVZ(sv, val->constant.u16); e.asm_().STRH(sv, host_addr); break;
-      case INT32_TYPE: e.MovImm64(sv, val->constant.u32); e.asm_().STRw(sv, host_addr); break;
-      case INT64_TYPE: e.MovImm64(sv, val->constant.i64); e.asm_().STR(sv, host_addr); break;
-      default: break;
+      case INT8_TYPE:
+        e.asm_().MOVZ(kScratch1, val->constant.u8);
+        e.asm_().STRB(kScratch1, host_addr);
+        return true;
+      case INT16_TYPE:
+        e.asm_().MOVZ(kScratch1, val->constant.u16);
+        EmitStoreHalfWordMemory(e, host_addr, kScratch1, byte_swap);
+        return true;
+      case INT32_TYPE:
+        e.MovImm64(kScratch1, val->constant.u32);
+        EmitStoreWordMemory(e, host_addr, kScratch1, byte_swap);
+        return true;
+      case INT64_TYPE:
+        e.MovImm64(kScratch1, val->constant.i64);
+        EmitStoreDoubleWordMemory(e, host_addr, kScratch1, byte_swap);
+        return true;
+      case FLOAT32_TYPE:
+        e.MovImm64(kScratch1, val->constant.u32);
+        EmitStoreFloat32Memory(e, host_addr, kScratch1, byte_swap);
+        return true;
+      case FLOAT64_TYPE:
+        e.MovImm64(kScratch1, val->constant.u64);
+        EmitStoreFloat64Memory(e, host_addr, kScratch1, byte_swap);
+        return true;
+      case VEC128_TYPE:
+        e.asm_().MOV(kScratch2, host_addr);
+        e.LoadConstantV128(kVScratch0, val->constant.v128);
+        EmitStoreVector128Memory(e, kScratch2, kVScratch0, byte_swap);
+        return true;
+      default:
+        return false;
     }
   } else if (IsAlloc(val)) {
-    // Byte swap before store if needed
-    GReg sv = GR(val);
-    if (i->flags & LOAD_STORE_BYTE_SWAP) {
-      sv = kScratch1;
-      switch (val->type) {
-        case INT16_TYPE: e.asm_().REV16(sv, GR(val)); break;
-        case INT32_TYPE: e.asm_().REVw(sv, GR(val)); break;
-        case INT64_TYPE: e.asm_().REV(sv, GR(val)); break;
-        default: e.asm_().MOV(sv, GR(val)); break;
-      }
-    }
     switch (val->type) {
-      case INT8_TYPE:  e.asm_().STRB(sv, host_addr); break;
-      case INT16_TYPE: e.asm_().STRH(sv, host_addr); break;
-      case INT32_TYPE: e.asm_().STRw(sv, host_addr); break;
-      case INT64_TYPE: e.asm_().STR(sv, host_addr); break;
-      case FLOAT32_TYPE: e.asm_().STR_S(VR(val), host_addr); break;
-      case FLOAT64_TYPE: e.asm_().STR_D(VR(val), host_addr); break;
-      case VEC128_TYPE:  e.asm_().STR_Q(VR(val), host_addr); break;
-      default: break;
+      case INT8_TYPE:
+        e.asm_().STRB(GR(val), host_addr);
+        return true;
+      case INT16_TYPE:
+        EmitStoreHalfWordMemory(e, host_addr, GR(val), byte_swap);
+        return true;
+      case INT32_TYPE:
+        EmitStoreWordMemory(e, host_addr, GR(val), byte_swap);
+        return true;
+      case INT64_TYPE:
+        EmitStoreDoubleWordMemory(e, host_addr, GR(val), byte_swap);
+        return true;
+      case FLOAT32_TYPE:
+        e.asm_().FMOV_WS(kScratch1, VR(val));
+        EmitStoreFloat32Memory(e, host_addr, kScratch1, byte_swap);
+        return true;
+      case FLOAT64_TYPE:
+        e.asm_().FMOV_XD(kScratch1, VR(val));
+        EmitStoreFloat64Memory(e, host_addr, kScratch1, byte_swap);
+        return true;
+      case VEC128_TYPE:
+        EmitStoreVector128Memory(e, host_addr, VR(val), byte_swap);
+        return true;
+      default:
+        return false;
     }
   }
   return true;
@@ -1560,6 +1879,7 @@ static bool EmitLoadOffset(A64Emitter& e, const Instr* i) {
   }
 
   GReg host_addr = ComputeHostAddress(e, addr, offset, kScratch0, kScratch1);
+  const bool byte_swap = (i->flags & LOAD_STORE_BYTE_SWAP) != 0;
 
   switch (dest->type) {
     case INT8_TYPE:
@@ -1579,19 +1899,19 @@ static bool EmitLoadOffset(A64Emitter& e, const Instr* i) {
       e.asm_().LDR(GR(dest), host_addr);
       break;
     case FLOAT32_TYPE:
-      e.asm_().LDR_S(VR(dest), host_addr);
-      break;
+      EmitLoadFloat32Memory(e, VR(dest), host_addr, byte_swap);
+      return true;
     case FLOAT64_TYPE:
-      e.asm_().LDR_D(VR(dest), host_addr);
-      break;
+      EmitLoadFloat64Memory(e, VR(dest), host_addr, byte_swap);
+      return true;
     case VEC128_TYPE:
-      e.asm_().LDR_Q(VR(dest), host_addr);
-      break;
+      EmitLoadVector128Memory(e, VR(dest), host_addr, byte_swap);
+      return true;
     default:
       return false;
   }
 
-  if (i->flags & LOAD_STORE_BYTE_SWAP) {
+  if (byte_swap) {
     switch (dest->type) {
       case INT16_TYPE:
         e.asm_().REV16(GR(dest), GR(dest));
@@ -1618,81 +1938,69 @@ static bool EmitStoreOffset(A64Emitter& e, const Instr* i) {
   }
 
   GReg host_addr = ComputeHostAddress(e, addr, offset, kScratch0, kScratch1);
+  const bool byte_swap = (i->flags & LOAD_STORE_BYTE_SWAP) != 0;
 
   if (VALUE_IS_CONSTANT(val)) {
-    GReg sv = kScratch1;
     switch (val->type) {
       case INT8_TYPE:
-        e.asm_().MOVZ(sv, val->constant.u8);
-        e.asm_().STRB(sv, host_addr);
-        break;
+        e.asm_().MOVZ(kScratch1, val->constant.u8);
+        e.asm_().STRB(kScratch1, host_addr);
+        return true;
       case INT16_TYPE:
-        e.asm_().MOVZ(sv, val->constant.u16);
-        if (i->flags & LOAD_STORE_BYTE_SWAP) {
-          e.asm_().REV16(sv, sv);
-        }
-        e.asm_().STRH(sv, host_addr);
-        break;
+        e.asm_().MOVZ(kScratch1, val->constant.u16);
+        EmitStoreHalfWordMemory(e, host_addr, kScratch1, byte_swap);
+        return true;
       case INT32_TYPE:
-        e.MovImm64(sv, val->constant.u32);
-        if (i->flags & LOAD_STORE_BYTE_SWAP) {
-          e.asm_().REVw(sv, sv);
-        }
-        e.asm_().STRw(sv, host_addr);
-        break;
+        e.MovImm64(kScratch1, val->constant.u32);
+        EmitStoreWordMemory(e, host_addr, kScratch1, byte_swap);
+        return true;
       case INT64_TYPE:
-        e.MovImm64(sv, val->constant.i64);
-        if (i->flags & LOAD_STORE_BYTE_SWAP) {
-          e.asm_().REV(sv, sv);
-        }
-        e.asm_().STR(sv, host_addr);
-        break;
+        e.MovImm64(kScratch1, val->constant.i64);
+        EmitStoreDoubleWordMemory(e, host_addr, kScratch1, byte_swap);
+        return true;
+      case FLOAT32_TYPE:
+        e.MovImm64(kScratch1, val->constant.u32);
+        EmitStoreFloat32Memory(e, host_addr, kScratch1, byte_swap);
+        return true;
+      case FLOAT64_TYPE:
+        e.MovImm64(kScratch1, val->constant.u64);
+        EmitStoreFloat64Memory(e, host_addr, kScratch1, byte_swap);
+        return true;
+      case VEC128_TYPE:
+        e.asm_().MOV(kScratch2, host_addr);
+        e.LoadConstantV128(kVScratch0, val->constant.v128);
+        EmitStoreVector128Memory(e, kScratch2, kVScratch0, byte_swap);
+        return true;
       default:
-        break;
+        return false;
     }
   } else if (IsAlloc(val)) {
-    GReg sv = GR(val);
-    if (i->flags & LOAD_STORE_BYTE_SWAP) {
-      sv = kScratch1;
-      switch (val->type) {
-        case INT16_TYPE:
-          e.asm_().REV16(sv, GR(val));
-          break;
-        case INT32_TYPE:
-          e.asm_().REVw(sv, GR(val));
-          break;
-        case INT64_TYPE:
-          e.asm_().REV(sv, GR(val));
-          break;
-        default:
-          e.asm_().MOV(sv, GR(val));
-          break;
-      }
-    }
     switch (val->type) {
       case INT8_TYPE:
-        e.asm_().STRB(sv, host_addr);
-        break;
+        e.asm_().STRB(GR(val), host_addr);
+        return true;
       case INT16_TYPE:
-        e.asm_().STRH(sv, host_addr);
-        break;
+        EmitStoreHalfWordMemory(e, host_addr, GR(val), byte_swap);
+        return true;
       case INT32_TYPE:
-        e.asm_().STRw(sv, host_addr);
-        break;
+        EmitStoreWordMemory(e, host_addr, GR(val), byte_swap);
+        return true;
       case INT64_TYPE:
-        e.asm_().STR(sv, host_addr);
-        break;
+        EmitStoreDoubleWordMemory(e, host_addr, GR(val), byte_swap);
+        return true;
       case FLOAT32_TYPE:
-        e.asm_().STR_S(VR(val), host_addr);
-        break;
+        e.asm_().FMOV_WS(kScratch1, VR(val));
+        EmitStoreFloat32Memory(e, host_addr, kScratch1, byte_swap);
+        return true;
       case FLOAT64_TYPE:
-        e.asm_().STR_D(VR(val), host_addr);
-        break;
+        e.asm_().FMOV_XD(kScratch1, VR(val));
+        EmitStoreFloat64Memory(e, host_addr, kScratch1, byte_swap);
+        return true;
       case VEC128_TYPE:
-        e.asm_().STR_Q(VR(val), host_addr);
-        break;
+        EmitStoreVector128Memory(e, host_addr, VR(val), byte_swap);
+        return true;
       default:
-        break;
+        return false;
     }
   }
   return true;
@@ -2003,21 +2311,94 @@ static bool EmitAndNot(A64Emitter& e, const Instr* i) {
 
 // === Shifts ===
 
+// Whole-vector shifts route through a C helper: the value goes out and comes
+// back via helper_scratch, the bit count (0-7) via arg0.
+static bool EmitVec128ShiftViaHelper(A64Emitter& e, const Instr* i,
+                                     uint64_t helper_address) {
+  auto val = i->src1.value;
+  auto amt = i->src2.value;
+  if (!i->dest || !IsAlloc(i->dest) || !val || !amt) return true;
+
+  e.asm_().SUB(kScratch1, kContextReg,
+               static_cast<uint32_t>(sizeof(A64BackendContext)));
+  const int32_t scratch_offset =
+      static_cast<int32_t>(offsetof(A64BackendContext, helper_scratch));
+  if (VALUE_IS_CONSTANT(val)) {
+    e.LoadConstantV128(kVScratch0, val->constant.v128);
+    e.asm_().SUB(kScratch1, kContextReg,
+                 static_cast<uint32_t>(sizeof(A64BackendContext)));
+    e.asm_().STR_Q(kVScratch0, kScratch1, scratch_offset);
+  } else if (IsAlloc(val)) {
+    e.asm_().STR_Q(VR(val), kScratch1, scratch_offset);
+  } else {
+    return true;
+  }
+
+  GReg amt_reg = LoadGPR(e, amt, X1);
+  if (amt_reg != X1) {
+    e.asm_().MOV(X1, amt_reg);
+  }
+  e.MovImm64(X2, 0);
+  e.MovImm64(X0, helper_address);
+  auto backend = static_cast<A64Backend*>(e.backend());
+  e.MovImm64(kScratch0,
+             reinterpret_cast<uint64_t>(backend->guest_to_host_thunk()));
+  e.asm_().BLR(kScratch0);
+
+  e.asm_().SUB(kScratch1, kContextReg,
+               static_cast<uint32_t>(sizeof(A64BackendContext)));
+  e.asm_().LDR_Q(VR(i->dest), kScratch1, scratch_offset);
+  return true;
+}
+
+// Shift semantics follow the x64 backend: the shift amount is masked to
+// [0, 31] for 8/16/32-bit operands and [0, 63] for 64-bit ones. Sub-word
+// results are kept zero-extended per the register convention.
+
 static bool EmitShl(A64Emitter& e, const Instr* i) {
   if (!i->dest || !IsAlloc(i->dest)) return true;
+  if (i->dest->type == VEC128_TYPE) {
+    return EmitVec128ShiftViaHelper(e, i,
+                                    reinterpret_cast<uint64_t>(&A64ShlV128));
+  }
   GReg rd = GR(i->dest);
   GReg r1 = LoadGPR(e, i->src1.value, kScratch0);
   GReg r2 = LoadGPR(e, i->src2.value, kScratch1);
-  e.asm_().LSLv(rd, r1, r2);
+  switch (i->dest->type) {
+    case INT8_TYPE:
+      e.asm_().LSLVw(rd, r1, r2);
+      e.asm_().UXTB(rd, rd);
+      break;
+    case INT16_TYPE:
+      e.asm_().LSLVw(rd, r1, r2);
+      e.asm_().UXTH(rd, rd);
+      break;
+    case INT32_TYPE:
+      e.asm_().LSLVw(rd, r1, r2);
+      break;
+    default:
+      e.asm_().LSLv(rd, r1, r2);
+      break;
+  }
   return true;
 }
 
 static bool EmitShr(A64Emitter& e, const Instr* i) {
   if (!i->dest || !IsAlloc(i->dest)) return true;
+  if (i->dest->type == VEC128_TYPE) {
+    return EmitVec128ShiftViaHelper(e, i,
+                                    reinterpret_cast<uint64_t>(&A64ShrV128));
+  }
   GReg rd = GR(i->dest);
   GReg r1 = LoadGPR(e, i->src1.value, kScratch0);
   GReg r2 = LoadGPR(e, i->src2.value, kScratch1);
-  e.asm_().LSRv(rd, r1, r2);
+  // Sub-word values are zero-extended, so a 32-bit logical shift right
+  // cannot pull in bits beyond the operand width.
+  if (i->dest->type <= INT32_TYPE) {
+    e.asm_().LSRVw(rd, r1, r2);
+  } else {
+    e.asm_().LSRv(rd, r1, r2);
+  }
   return true;
 }
 
@@ -2026,7 +2407,24 @@ static bool EmitSha(A64Emitter& e, const Instr* i) {
   GReg rd = GR(i->dest);
   GReg r1 = LoadGPR(e, i->src1.value, kScratch0);
   GReg r2 = LoadGPR(e, i->src2.value, kScratch1);
-  e.asm_().ASRv(rd, r1, r2);
+  switch (i->dest->type) {
+    case INT8_TYPE:
+      e.asm_().SXTB(kScratch2, r1);
+      e.asm_().ASRVw(rd, kScratch2, r2);
+      e.asm_().UXTB(rd, rd);
+      break;
+    case INT16_TYPE:
+      e.asm_().SXTH(kScratch2, r1);
+      e.asm_().ASRVw(rd, kScratch2, r2);
+      e.asm_().UXTH(rd, rd);
+      break;
+    case INT32_TYPE:
+      e.asm_().ASRVw(rd, r1, r2);
+      break;
+    default:
+      e.asm_().ASRv(rd, r1, r2);
+      break;
+  }
   return true;
 }
 
@@ -2035,9 +2433,37 @@ static bool EmitRotateLeft(A64Emitter& e, const Instr* i) {
   GReg rd = GR(i->dest);
   GReg r1 = LoadGPR(e, i->src1.value, kScratch0);
   GReg r2 = LoadGPR(e, i->src2.value, kScratch1);
-  // ROL(x, n) = ROR(x, 64-n)
-  e.asm_().NEG(kScratch2, r2);
-  e.asm_().RORv(rd, r1, kScratch2);
+  switch (i->dest->type) {
+    case INT8_TYPE:
+    case INT16_TYPE: {
+      // No hardware sub-word rotate: (x << n) | (x >> (width - n)),
+      // with n taken mod width. x is zero-extended per convention.
+      const uint32_t width = i->dest->type == INT8_TYPE ? 8 : 16;
+      e.asm_().MOVZ(kScratch2, width - 1);
+      e.asm_().ANDw(kScratch2, r2, kScratch2);  // n %= width
+      e.asm_().LSLVw(kScratch1, r1, kScratch2);  // r2 dead from here on
+      e.asm_().NEGw(kScratch2, kScratch2);
+      e.asm_().ADD_immw(kScratch2, kScratch2, width);  // width - n
+      e.asm_().LSRVw(kScratch2, r1, kScratch2);  // n==0 shifts by width -> 0
+      e.asm_().ORRw(rd, kScratch1, kScratch2);
+      if (i->dest->type == INT8_TYPE) {
+        e.asm_().UXTB(rd, rd);
+      } else {
+        e.asm_().UXTH(rd, rd);
+      }
+      break;
+    }
+    case INT32_TYPE:
+      // ROL32(x, n) = ROR32(x, 32-n); RORVw masks the amount mod 32.
+      e.asm_().NEGw(kScratch2, r2);
+      e.asm_().RORVw(rd, r1, kScratch2);
+      break;
+    default:
+      // ROL64(x, n) = ROR64(x, 64-n)
+      e.asm_().NEG(kScratch2, r2);
+      e.asm_().RORv(rd, r1, kScratch2);
+      break;
+  }
   return true;
 }
 
@@ -2072,6 +2498,16 @@ static bool EmitCompareUGE(A64Emitter& e, const Instr* i) { return EmitCompare(e
 
 static bool EmitByteSwap(A64Emitter& e, const Instr* i) {
   if (!i->dest || !IsAlloc(i->dest)) return true;
+  if (i->src1.value && i->src1.value->type == VEC128_TYPE) {
+    // v128 byte swap reverses bytes within each 32-bit word.
+    if (VALUE_IS_CONSTANT(i->src1.value)) {
+      e.LoadConstantV128(kVScratch0, i->src1.value->constant.v128);
+      e.asm_().REV32_16B(VR(i->dest), kVScratch0);
+    } else {
+      e.asm_().REV32_16B(VR(i->dest), VR(i->src1.value));
+    }
+    return true;
+  }
   GReg rd = GR(i->dest);
   GReg rs = LoadGPR(e, i->src1.value, kScratch0);
   switch (i->src1.value->type) {
@@ -2372,25 +2808,24 @@ static bool EmitFNeg(A64Emitter& e, const Instr* i) {
 }
 
 static bool EmitSetRoundingMode(A64Emitter& e, const Instr* i) {
-  // Set ARM64 FPCR rounding mode bits [23:22]
-  // src1 = rounding mode value from guest
+  // src1 = PPC FPSCR[RN]: 0=nearest, 1=toward zero, 2=+inf, 3=-inf.
+  // ARM FPCR RMode (bits [23:22]): 0=nearest, 1=+inf, 2=-inf, 3=zero.
+  // The mapping (0->0, 1->3, 2->1, 3->2) is packed into 0x9C, two bits per
+  // guest mode.
   auto src = i->src1.value;
   if (!src) return true;
   GReg mode = LoadGPR(e, src, kScratch0);
-  // Read current FPCR
+  e.asm_().MOVZ(kScratch2, 3);
+  e.asm_().ANDw(kScratch1, mode, kScratch2);      // g = mode & 3
+  e.asm_().LSL_imm(kScratch1, kScratch1, 1);      // g * 2
+  e.asm_().MOVZ(kScratch0, 0x9C);                 // mode no longer needed
+  e.asm_().LSRv(kScratch0, kScratch0, kScratch1); // table >> (g*2)
+  e.asm_().ANDw(kScratch0, kScratch0, kScratch2); // ARM RMode
+  e.asm_().LSL_imm(kScratch0, kScratch0, 22);
   e.asm_().MRS_FPCR(kScratch1);
-  // Clear rounding mode bits [23:22]
   e.MovImm64(kScratch2, ~(3ULL << 22));
   e.asm_().AND(kScratch1, kScratch1, kScratch2);
-  // Shift mode into bits [23:22] and OR in
-  e.asm_().AND(mode, mode, kScratch2);  // mask to 2 bits
-  e.asm_().MOVZ(kScratch2, 3);
-  e.asm_().AND(mode, mode, kScratch2);
-  e.asm_().LSLv(mode, mode, kScratch2);  // shift by 22
-  e.MovImm64(kScratch2, 22);
-  e.asm_().LSLv(mode, mode, kScratch2);
-  e.asm_().ORR(kScratch1, kScratch1, mode);
-  // Write back FPCR
+  e.asm_().ORR(kScratch1, kScratch1, kScratch0);
   e.asm_().MSR_FPCR(kScratch1);
   return true;
 }
@@ -2555,6 +2990,36 @@ static bool EmitSplat(A64Emitter& e, const Instr* i) {
   return true;
 }
 
+// INSERT/EXTRACT indices are guest-order element numbers; within each
+// 32-bit word the guest byte order is reversed relative to the host, so
+// byte lanes swizzle with ^3 and halfword lanes with ^1 (words map 1:1).
+
+// Computes the host byte offset of a guest element into `out` (clobbers
+// kScratch2). `idx` is the guest index register.
+static void EmitElementOffset(A64Emitter& e, GReg out, GReg idx,
+                              TypeName part_type) {
+  switch (part_type) {
+    case INT8_TYPE:
+      e.asm_().MOVZ(out, 0xF);
+      e.asm_().ANDw(out, idx, out);
+      e.asm_().MOVZ(kScratch2, 3);
+      e.asm_().EORw(out, out, kScratch2);
+      break;
+    case INT16_TYPE:
+      e.asm_().MOVZ(out, 0x7);
+      e.asm_().ANDw(out, idx, out);
+      e.asm_().MOVZ(kScratch2, 1);
+      e.asm_().EORw(out, out, kScratch2);
+      e.asm_().LSL_imm(out, out, 1);
+      break;
+    default:  // INT32/FLOAT32
+      e.asm_().MOVZ(out, 0x3);
+      e.asm_().ANDw(out, idx, out);
+      e.asm_().LSL_imm(out, out, 2);
+      break;
+  }
+}
+
 static bool EmitInsert(A64Emitter& e, const Instr* i) {
   if (!i->dest || !IsAlloc(i->dest)) return true;
   auto vec = i->src1.value;
@@ -2563,21 +3028,66 @@ static bool EmitInsert(A64Emitter& e, const Instr* i) {
   if (!vec || !idx_val || !part) return true;
 
   VReg vd = VR(i->dest);
-  if (IsAlloc(vec) && vd != VR(vec)) {
+  if (VALUE_IS_CONSTANT(vec)) {
+    e.LoadConstantV128(vd, vec->constant.v128);
+  } else if (IsAlloc(vec) && vd != VR(vec)) {
     e.asm_().MOV_16B(vd, VR(vec));
   }
-  uint32_t idx =
-      VALUE_IS_CONSTANT(idx_val) ? (uint32_t)idx_val->constant.u32 : 0;
-  if (VALUE_IS_CONSTANT(part)) {
-    e.MovImm64(kScratch0, part->constant.i64);
-    e.asm_().INS_S_GPR(vd, idx, kScratch0);
-  } else if (IsAlloc(part)) {
-    if (part->type <= INT64_TYPE) {
-      e.asm_().INS_S_GPR(vd, idx, GR(part));
+
+  if (VALUE_IS_CONSTANT(idx_val)) {
+    const uint32_t idx = (uint32_t)idx_val->constant.u8;
+    GReg part_reg;
+    if (VALUE_IS_CONSTANT(part)) {
+      e.MovImm64(kScratch0, part->constant.i64);
+      part_reg = kScratch0;
+    } else if (IsAlloc(part) && part->type <= INT64_TYPE) {
+      part_reg = GR(part);
+    } else if (IsAlloc(part)) {
+      e.asm_().INS_S(vd, idx & 3, VR(part), 0);
+      return true;
     } else {
-      e.asm_().INS_S(vd, idx, VR(part), 0);
+      return true;
     }
+    switch (part->type) {
+      case INT8_TYPE:
+        e.asm_().INS_B_GPR(vd, (idx ^ 3) & 15, part_reg);
+        break;
+      case INT16_TYPE:
+        e.asm_().INS_H_GPR(vd, (idx ^ 1) & 7, part_reg);
+        break;
+      default:
+        e.asm_().INS_S_GPR(vd, idx & 3, part_reg);
+        break;
+    }
+    return true;
   }
+
+  // Dynamic index: spill, patch the element in memory, reload.
+  e.asm_().STR_Q(vd, X29, StackLayout::GUEST_SCRATCH);
+  GReg idx = LoadGPR(e, idx_val, kScratch0);
+  EmitElementOffset(e, kScratch1, idx, part->type);
+  e.asm_().ADD(kScratch1, X29, kScratch1);
+  GReg part_reg;
+  if (VALUE_IS_CONSTANT(part)) {
+    e.MovImm64(kScratch2, part->constant.i64);
+    part_reg = kScratch2;
+  } else if (IsAlloc(part) && part->type <= INT64_TYPE) {
+    part_reg = GR(part);
+  } else {
+    return true;
+  }
+  switch (part->type) {
+    case INT8_TYPE:
+      e.asm_().STRB(part_reg, kScratch1, StackLayout::GUEST_SCRATCH);
+      break;
+    case INT16_TYPE:
+      e.asm_().STRH(part_reg, kScratch1, StackLayout::GUEST_SCRATCH);
+      break;
+    default:
+      e.asm_().STRw(part_reg, kScratch1, StackLayout::GUEST_SCRATCH);
+      break;
+  }
+  e.asm_().LDR_Q(vd, X29, StackLayout::GUEST_SCRATCH);
   return true;
 }
 
@@ -2585,193 +3095,382 @@ static bool EmitExtract(A64Emitter& e, const Instr* i) {
   if (!i->dest || !IsAlloc(i->dest)) return true;
   auto vec = i->src1.value;
   auto idx_val = i->src2.value;
-  if (!vec || !idx_val || !IsAlloc(vec)) return true;
+  if (!vec || !idx_val) return true;
+  VReg vs = LoadVec128(e, vec, kVScratch0);
 
-  uint32_t idx =
-      VALUE_IS_CONSTANT(idx_val) ? (uint32_t)idx_val->constant.u32 : 0;
-  if (i->dest->type <= INT64_TYPE) {
-    e.asm_().UMOV_W(GR(i->dest), VR(vec), idx);
-  } else {
-    e.asm_().DUP_S(VR(i->dest), VR(vec), idx);
+  if (VALUE_IS_CONSTANT(idx_val)) {
+    const uint32_t idx = (uint32_t)idx_val->constant.u8;
+    switch (i->dest->type) {
+      case INT8_TYPE:
+        e.asm_().UMOV_B(GR(i->dest), vs, (idx ^ 3) & 15);
+        return true;
+      case INT16_TYPE:
+        e.asm_().UMOV_H(GR(i->dest), vs, (idx ^ 1) & 7);
+        return true;
+      case INT32_TYPE:
+      case INT64_TYPE:
+        e.asm_().UMOV_W(GR(i->dest), vs, idx & 3);
+        return true;
+      case FLOAT32_TYPE:
+        e.asm_().DUP_S(VR(i->dest), vs, idx & 3);
+        return true;
+      default:
+        return false;
+    }
   }
-  return true;
+
+  // Dynamic index: spill and load the element from memory.
+  e.asm_().STR_Q(vs, X29, StackLayout::GUEST_SCRATCH);
+  GReg idx = LoadGPR(e, idx_val, kScratch0);
+  EmitElementOffset(e, kScratch1, idx, i->dest->type);
+  e.asm_().ADD(kScratch1, X29, kScratch1);
+  switch (i->dest->type) {
+    case INT8_TYPE:
+      e.asm_().LDRB(GR(i->dest), kScratch1, StackLayout::GUEST_SCRATCH);
+      return true;
+    case INT16_TYPE:
+      e.asm_().LDRH(GR(i->dest), kScratch1, StackLayout::GUEST_SCRATCH);
+      return true;
+    case INT32_TYPE:
+    case INT64_TYPE:
+      e.asm_().LDRw(GR(i->dest), kScratch1, StackLayout::GUEST_SCRATCH);
+      return true;
+    default:
+      return false;
+  }
 }
 
+// VECTOR_ADD/SUB/AVERAGE pack flags as part_type | (arithmetic_flags << 8);
+// VECTOR_MAX/MIN pack them the other way around (see hir_builder.cc).
 static bool EmitVectorAdd(A64Emitter& e, const Instr* i) {
   if (!i->dest || !IsAlloc(i->dest)) return true;
   auto s1 = i->src1.value, s2 = i->src2.value;
-  if (!IsAlloc(s1) || !IsAlloc(s2)) { e.asm_().NOP(); return true; }
+  if (!s1 || !s2) { e.asm_().NOP(); return true; }
+  VReg v1 = LoadVec128(e, s1, kVScratch0);
+  VReg v2 = LoadVec128(e, s2, kVScratch1);
   VReg vd = VR(i->dest);
-  // Check flags for float vs int
-  uint32_t type_size = i->flags & 0x7;
-  if (type_size == 6) {  // FLOAT32 type part
-    e.asm_().FADD_4S(vd, VR(s1), VR(s2));
-  } else {
-    e.asm_().ADD_4S(vd, VR(s1), VR(s2));
+  const TypeName part_type = static_cast<TypeName>(i->flags & 0xFF);
+  const uint32_t arith = i->flags >> 8;
+  const bool is_unsigned = !!(arith & ARITHMETIC_UNSIGNED);
+  const bool saturate = !!(arith & ARITHMETIC_SATURATE);
+  switch (part_type) {
+    case INT8_TYPE:
+      if (saturate) {
+        if (is_unsigned) e.asm_().UQADD_16B(vd, v1, v2);
+        else e.asm_().SQADD_16B(vd, v1, v2);
+      } else {
+        e.asm_().ADD_16B(vd, v1, v2);
+      }
+      return true;
+    case INT16_TYPE:
+      if (saturate) {
+        if (is_unsigned) e.asm_().UQADD_8H(vd, v1, v2);
+        else e.asm_().SQADD_8H(vd, v1, v2);
+      } else {
+        e.asm_().ADD_8H(vd, v1, v2);
+      }
+      return true;
+    case INT32_TYPE:
+      if (saturate) {
+        if (is_unsigned) e.asm_().UQADD_4S(vd, v1, v2);
+        else e.asm_().SQADD_4S(vd, v1, v2);
+      } else {
+        e.asm_().ADD_4S(vd, v1, v2);
+      }
+      return true;
+    case FLOAT32_TYPE:
+      e.asm_().FADD_4S(vd, v1, v2);
+      return true;
+    default:
+      return false;
   }
-  return true;
 }
 
 static bool EmitVectorSub(A64Emitter& e, const Instr* i) {
   if (!i->dest || !IsAlloc(i->dest)) return true;
   auto s1 = i->src1.value, s2 = i->src2.value;
-  if (!IsAlloc(s1) || !IsAlloc(s2)) { e.asm_().NOP(); return true; }
+  if (!s1 || !s2) { e.asm_().NOP(); return true; }
+  VReg v1 = LoadVec128(e, s1, kVScratch0);
+  VReg v2 = LoadVec128(e, s2, kVScratch1);
   VReg vd = VR(i->dest);
-  uint32_t type_size = i->flags & 0x7;
-  if (type_size == 6) {
-    e.asm_().FSUB_4S(vd, VR(s1), VR(s2));
-  } else {
-    e.asm_().SUB_4S(vd, VR(s1), VR(s2));
+  const TypeName part_type = static_cast<TypeName>(i->flags & 0xFF);
+  const uint32_t arith = i->flags >> 8;
+  const bool is_unsigned = !!(arith & ARITHMETIC_UNSIGNED);
+  const bool saturate = !!(arith & ARITHMETIC_SATURATE);
+  switch (part_type) {
+    case INT8_TYPE:
+      if (saturate) {
+        if (is_unsigned) e.asm_().UQSUB_16B(vd, v1, v2);
+        else e.asm_().SQSUB_16B(vd, v1, v2);
+      } else {
+        e.asm_().SUB_16B(vd, v1, v2);
+      }
+      return true;
+    case INT16_TYPE:
+      if (saturate) {
+        if (is_unsigned) e.asm_().UQSUB_8H(vd, v1, v2);
+        else e.asm_().SQSUB_8H(vd, v1, v2);
+      } else {
+        e.asm_().SUB_8H(vd, v1, v2);
+      }
+      return true;
+    case INT32_TYPE:
+      if (saturate) {
+        if (is_unsigned) e.asm_().UQSUB_4S(vd, v1, v2);
+        else e.asm_().SQSUB_4S(vd, v1, v2);
+      } else {
+        e.asm_().SUB_4S(vd, v1, v2);
+      }
+      return true;
+    case FLOAT32_TYPE:
+      e.asm_().FSUB_4S(vd, v1, v2);
+      return true;
+    default:
+      return false;
   }
-  return true;
+}
+
+// VECTOR_COMPARE_* flags are the bare part type.
+enum class VectorCmp { EQ, SGT, SGE, UGT, UGE };
+
+static bool EmitVectorCompareCommon(A64Emitter& e, const Instr* i,
+                                    VectorCmp cmp) {
+  if (!i->dest || !IsAlloc(i->dest)) return true;
+  auto s1 = i->src1.value, s2 = i->src2.value;
+  if (!s1 || !s2) { e.asm_().NOP(); return true; }
+  VReg v1 = LoadVec128(e, s1, kVScratch0);
+  VReg v2 = LoadVec128(e, s2, kVScratch1);
+  VReg vd = VR(i->dest);
+  switch (static_cast<TypeName>(i->flags)) {
+    case INT8_TYPE:
+      switch (cmp) {
+        case VectorCmp::EQ:  e.asm_().CMEQ_16B(vd, v1, v2); return true;
+        case VectorCmp::SGT: e.asm_().CMGT_16B(vd, v1, v2); return true;
+        case VectorCmp::SGE: e.asm_().CMGE_16B(vd, v1, v2); return true;
+        case VectorCmp::UGT: e.asm_().CMHI_16B(vd, v1, v2); return true;
+        case VectorCmp::UGE: e.asm_().CMHS_16B(vd, v1, v2); return true;
+      }
+      return false;
+    case INT16_TYPE:
+      switch (cmp) {
+        case VectorCmp::EQ:  e.asm_().CMEQ_8H(vd, v1, v2); return true;
+        case VectorCmp::SGT: e.asm_().CMGT_8H(vd, v1, v2); return true;
+        case VectorCmp::SGE: e.asm_().CMGE_8H(vd, v1, v2); return true;
+        case VectorCmp::UGT: e.asm_().CMHI_8H(vd, v1, v2); return true;
+        case VectorCmp::UGE: e.asm_().CMHS_8H(vd, v1, v2); return true;
+      }
+      return false;
+    case INT32_TYPE:
+      switch (cmp) {
+        case VectorCmp::EQ:  e.asm_().CMEQ_4S(vd, v1, v2); return true;
+        case VectorCmp::SGT: e.asm_().CMGT_4S(vd, v1, v2); return true;
+        case VectorCmp::SGE: e.asm_().CMGE_4S(vd, v1, v2); return true;
+        case VectorCmp::UGT: e.asm_().CMHI_4S(vd, v1, v2); return true;
+        case VectorCmp::UGE: e.asm_().CMHS_4S(vd, v1, v2); return true;
+      }
+      return false;
+    case FLOAT32_TYPE:
+      switch (cmp) {
+        case VectorCmp::EQ:  e.asm_().FCMEQ_4S(vd, v1, v2); return true;
+        case VectorCmp::SGT: e.asm_().FCMGT_4S(vd, v1, v2); return true;
+        case VectorCmp::SGE: e.asm_().FCMGE_4S(vd, v1, v2); return true;
+        default: return false;  // no unsigned float compares
+      }
+    default:
+      return false;
+  }
 }
 
 static bool EmitVectorCompareEQ(A64Emitter& e, const Instr* i) {
-  if (!i->dest || !IsAlloc(i->dest)) return true;
-  auto s1 = i->src1.value, s2 = i->src2.value;
-  if (!IsAlloc(s1) || !IsAlloc(s2)) { e.asm_().NOP(); return true; }
-  uint32_t type_size = i->flags & 0x7;
-  if (type_size == 6) {
-    e.asm_().FCMEQ_4S(VR(i->dest), VR(s1), VR(s2));
-  } else {
-    e.asm_().CMEQ_4S(VR(i->dest), VR(s1), VR(s2));
-  }
-  return true;
+  return EmitVectorCompareCommon(e, i, VectorCmp::EQ);
 }
-
 static bool EmitVectorCompareSGT(A64Emitter& e, const Instr* i) {
-  if (!i->dest || !IsAlloc(i->dest)) return true;
-  auto s1 = i->src1.value, s2 = i->src2.value;
-  if (!IsAlloc(s1) || !IsAlloc(s2)) { e.asm_().NOP(); return true; }
-  uint32_t type_size = i->flags & 0x7;
-  if (type_size == 6) {
-    e.asm_().FCMGT_4S(VR(i->dest), VR(s1), VR(s2));
-  } else {
-    e.asm_().CMGT_4S(VR(i->dest), VR(s1), VR(s2));
-  }
-  return true;
+  return EmitVectorCompareCommon(e, i, VectorCmp::SGT);
 }
-
 static bool EmitVectorCompareSGE(A64Emitter& e, const Instr* i) {
-  if (!i->dest || !IsAlloc(i->dest)) return true;
-  auto s1 = i->src1.value, s2 = i->src2.value;
-  if (!IsAlloc(s1) || !IsAlloc(s2)) { e.asm_().NOP(); return true; }
-  uint32_t type_size = i->flags & 0x7;
-  if (type_size == 6) {
-    e.asm_().FCMGE_4S(VR(i->dest), VR(s1), VR(s2));
-  } else {
-    e.asm_().CMGE_4S(VR(i->dest), VR(s1), VR(s2));
-  }
-  return true;
+  return EmitVectorCompareCommon(e, i, VectorCmp::SGE);
 }
-
 static bool EmitVectorCompareUGT(A64Emitter& e, const Instr* i) {
-  if (!i->dest || !IsAlloc(i->dest)) return true;
-  auto s1 = i->src1.value, s2 = i->src2.value;
-  if (!IsAlloc(s1) || !IsAlloc(s2)) { e.asm_().NOP(); return true; }
-  e.asm_().CMHI_4S(VR(i->dest), VR(s1), VR(s2));
-  return true;
+  return EmitVectorCompareCommon(e, i, VectorCmp::UGT);
+}
+static bool EmitVectorCompareUGE(A64Emitter& e, const Instr* i) {
+  return EmitVectorCompareCommon(e, i, VectorCmp::UGE);
 }
 
-static bool EmitVectorCompareUGE(A64Emitter& e, const Instr* i) {
+static bool EmitVectorMinMaxCommon(A64Emitter& e, const Instr* i, bool is_max) {
   if (!i->dest || !IsAlloc(i->dest)) return true;
   auto s1 = i->src1.value, s2 = i->src2.value;
-  if (!IsAlloc(s1) || !IsAlloc(s2)) { e.asm_().NOP(); return true; }
-  e.asm_().CMHS_4S(VR(i->dest), VR(s1), VR(s2));
-  return true;
+  if (!s1 || !s2) { e.asm_().NOP(); return true; }
+  VReg v1 = LoadVec128(e, s1, kVScratch0);
+  VReg v2 = LoadVec128(e, s2, kVScratch1);
+  VReg vd = VR(i->dest);
+  // VECTOR_MAX/MIN: flags = arithmetic_flags | (part_type << 8)
+  const TypeName part_type = static_cast<TypeName>(i->flags >> 8);
+  const bool is_unsigned = !!(i->flags & ARITHMETIC_UNSIGNED);
+  switch (part_type) {
+    case INT8_TYPE:
+      if (is_unsigned) {
+        if (is_max) e.asm_().UMAX_16B(vd, v1, v2);
+        else e.asm_().UMIN_16B(vd, v1, v2);
+      } else {
+        if (is_max) e.asm_().SMAX_16B(vd, v1, v2);
+        else e.asm_().SMIN_16B(vd, v1, v2);
+      }
+      return true;
+    case INT16_TYPE:
+      if (is_unsigned) {
+        if (is_max) e.asm_().UMAX_8H(vd, v1, v2);
+        else e.asm_().UMIN_8H(vd, v1, v2);
+      } else {
+        if (is_max) e.asm_().SMAX_8H(vd, v1, v2);
+        else e.asm_().SMIN_8H(vd, v1, v2);
+      }
+      return true;
+    case INT32_TYPE:
+      if (is_unsigned) {
+        if (is_max) e.asm_().UMAX_4S(vd, v1, v2);
+        else e.asm_().UMIN_4S(vd, v1, v2);
+      } else {
+        if (is_max) e.asm_().SMAX_4S(vd, v1, v2);
+        else e.asm_().SMIN_4S(vd, v1, v2);
+      }
+      return true;
+    case FLOAT32_TYPE:
+      if (is_max) e.asm_().FMAX_4S(vd, v1, v2);
+      else e.asm_().FMIN_4S(vd, v1, v2);
+      return true;
+    default:
+      return false;
+  }
 }
 
 static bool EmitVectorMax(A64Emitter& e, const Instr* i) {
-  if (!i->dest || !IsAlloc(i->dest)) return true;
-  auto s1 = i->src1.value, s2 = i->src2.value;
-  if (!IsAlloc(s1) || !IsAlloc(s2)) { e.asm_().NOP(); return true; }
-  uint32_t type_size = i->flags & 0x7;
-  if (type_size == 6) {
-    e.asm_().FMAX_4S(VR(i->dest), VR(s1), VR(s2));
-  } else if (i->flags & ARITHMETIC_UNSIGNED) {
-    e.asm_().UMAX_4S(VR(i->dest), VR(s1), VR(s2));
-  } else {
-    e.asm_().SMAX_4S(VR(i->dest), VR(s1), VR(s2));
-  }
-  return true;
+  return EmitVectorMinMaxCommon(e, i, true);
 }
 
 static bool EmitVectorMin(A64Emitter& e, const Instr* i) {
+  return EmitVectorMinMaxCommon(e, i, false);
+}
+
+// Per-element shifts. PPC (vslb/vslh/vslw etc.) masks each lane's shift
+// amount to the element width; NEON *SHL produces 0 for out-of-range
+// amounts, so the mask is required. Negative amounts shift right.
+static bool EmitVectorShiftCommon(A64Emitter& e, const Instr* i, bool right,
+                                  bool arithmetic) {
   if (!i->dest || !IsAlloc(i->dest)) return true;
   auto s1 = i->src1.value, s2 = i->src2.value;
-  if (!IsAlloc(s1) || !IsAlloc(s2)) { e.asm_().NOP(); return true; }
-  uint32_t type_size = i->flags & 0x7;
-  if (type_size == 6) {
-    e.asm_().FMIN_4S(VR(i->dest), VR(s1), VR(s2));
-  } else if (i->flags & ARITHMETIC_UNSIGNED) {
-    e.asm_().UMIN_4S(VR(i->dest), VR(s1), VR(s2));
-  } else {
-    e.asm_().SMIN_4S(VR(i->dest), VR(s1), VR(s2));
+  if (!s1 || !s2) { e.asm_().NOP(); return true; }
+  VReg v1 = LoadVec128(e, s1, kVScratch0);
+  VReg v2 = LoadVec128(e, s2, kVScratch1);
+  VReg vd = VR(i->dest);
+  switch (i->flags) {
+    case INT8_TYPE:
+      e.asm_().MOVI_16B(kVScratch2, 7);
+      e.asm_().AND_16B(kVScratch2, v2, kVScratch2);
+      if (right) e.asm_().NEG_16B(kVScratch2, kVScratch2);
+      if (arithmetic) e.asm_().SSHL_16B(vd, v1, kVScratch2);
+      else e.asm_().USHL_16B(vd, v1, kVScratch2);
+      return true;
+    case INT16_TYPE:
+      e.asm_().MOVI_8H(kVScratch2, 15);
+      e.asm_().AND_16B(kVScratch2, v2, kVScratch2);
+      if (right) e.asm_().NEG_8H(kVScratch2, kVScratch2);
+      if (arithmetic) e.asm_().SSHL_8H(vd, v1, kVScratch2);
+      else e.asm_().USHL_8H(vd, v1, kVScratch2);
+      return true;
+    case INT32_TYPE:
+      e.asm_().MOVI_4S(kVScratch2, 31);
+      e.asm_().AND_16B(kVScratch2, v2, kVScratch2);
+      if (right) e.asm_().NEG_4S(kVScratch2, kVScratch2);
+      if (arithmetic) e.asm_().SSHL_4S(vd, v1, kVScratch2);
+      else e.asm_().USHL_4S(vd, v1, kVScratch2);
+      return true;
+    default:
+      return false;
   }
-  return true;
 }
 
 static bool EmitVectorShl(A64Emitter& e, const Instr* i) {
-  if (!i->dest || !IsAlloc(i->dest)) return true;
-  auto s1 = i->src1.value, s2 = i->src2.value;
-  if (!IsAlloc(s1) || !IsAlloc(s2)) { e.asm_().NOP(); return true; }
-  // USHL uses positive shift for left
-  e.asm_().USHL_4S(VR(i->dest), VR(s1), VR(s2));
-  return true;
+  return EmitVectorShiftCommon(e, i, false, false);
 }
 
 static bool EmitVectorShr(A64Emitter& e, const Instr* i) {
-  if (!i->dest || !IsAlloc(i->dest)) return true;
-  auto s1 = i->src1.value, s2 = i->src2.value;
-  if (!IsAlloc(s1) || !IsAlloc(s2)) { e.asm_().NOP(); return true; }
-  // USHL with negated shift = right shift
-  e.asm_().NEG_4S(kVScratch0, VR(s2));
-  e.asm_().USHL_4S(VR(i->dest), VR(s1), kVScratch0);
-  return true;
+  return EmitVectorShiftCommon(e, i, true, false);
 }
 
 static bool EmitVectorSha(A64Emitter& e, const Instr* i) {
-  if (!i->dest || !IsAlloc(i->dest)) return true;
-  auto s1 = i->src1.value, s2 = i->src2.value;
-  if (!IsAlloc(s1) || !IsAlloc(s2)) { e.asm_().NOP(); return true; }
-  // SSHL with negated shift = arithmetic right shift
-  e.asm_().NEG_4S(kVScratch0, VR(s2));
-  e.asm_().SSHL_4S(VR(i->dest), VR(s1), kVScratch0);
-  return true;
+  return EmitVectorShiftCommon(e, i, true, true);
 }
 
 static bool EmitVectorRotateLeft(A64Emitter& e, const Instr* i) {
   if (!i->dest || !IsAlloc(i->dest)) return true;
   auto s1 = i->src1.value, s2 = i->src2.value;
-  if (!IsAlloc(s1) || !IsAlloc(s2)) { e.asm_().NOP(); return true; }
-  // ROL = (x << n) | (x >> (32-n))
+  if (!s1 || !s2) { e.asm_().NOP(); return true; }
+  VReg v1 = LoadVec128(e, s1, kVScratch0);
+  VReg v2 = LoadVec128(e, s2, kVScratch1);
   VReg vd = VR(i->dest);
-  VReg vs = VR(s1);
-  VReg vn = VR(s2);
-  // Left shift
-  e.asm_().USHL_4S(kVScratch0, vs, vn);
-  // Right shift by (32 - n)
-  e.asm_().MOVI_4S_zero(kVScratch1);
-  // Load 32 into each lane
-  e.asm_().MOVZ(kScratch0, 32);
-  e.asm_().DUP_4S(kVScratch1, kScratch0);
-  e.asm_().SUB_4S(kVScratch1, kVScratch1, vn);
-  e.asm_().NEG_4S(kVScratch1, kVScratch1);  // negate for USHL = right shift
-  e.asm_().USHL_4S(vd, vs, kVScratch1);
-  e.asm_().ORR_16B(vd, vd, kVScratch0);
-  return true;
+  // ROL(x, n) = (x << n) | (x >> (width - n)), n taken mod width.
+  // The right shift is a USHL by (n - width), which is 0 for n == 0.
+  // NOT(width-1 splat) is a splat of -width, so n - width comes from an ADD.
+  switch (i->flags) {
+    case INT8_TYPE:
+      e.asm_().MOVI_16B(kVScratch2, 7);
+      e.asm_().AND_16B(kVScratch1, v2, kVScratch2);   // n (v2 dead after)
+      e.asm_().NOT_16B(kVScratch2, kVScratch2);       // -8 splat
+      e.asm_().ADD_16B(kVScratch2, kVScratch1, kVScratch2);  // n - 8
+      e.asm_().USHL_16B(kVScratch1, v1, kVScratch1);  // x << n
+      e.asm_().USHL_16B(kVScratch2, v1, kVScratch2);  // x >> (8 - n)
+      e.asm_().ORR_16B(vd, kVScratch1, kVScratch2);
+      return true;
+    case INT16_TYPE:
+      e.asm_().MOVI_8H(kVScratch2, 15);
+      e.asm_().AND_16B(kVScratch1, v2, kVScratch2);
+      e.asm_().NOT_16B(kVScratch2, kVScratch2);
+      e.asm_().ADD_8H(kVScratch2, kVScratch1, kVScratch2);
+      e.asm_().USHL_8H(kVScratch1, v1, kVScratch1);
+      e.asm_().USHL_8H(kVScratch2, v1, kVScratch2);
+      e.asm_().ORR_16B(vd, kVScratch1, kVScratch2);
+      return true;
+    case INT32_TYPE:
+      e.asm_().MOVI_4S(kVScratch2, 31);
+      e.asm_().AND_16B(kVScratch1, v2, kVScratch2);
+      e.asm_().NOT_16B(kVScratch2, kVScratch2);
+      e.asm_().ADD_4S(kVScratch2, kVScratch1, kVScratch2);
+      e.asm_().USHL_4S(kVScratch1, v1, kVScratch1);
+      e.asm_().USHL_4S(kVScratch2, v1, kVScratch2);
+      e.asm_().ORR_16B(vd, kVScratch1, kVScratch2);
+      return true;
+    default:
+      return false;
+  }
 }
 
 static bool EmitVectorAverage(A64Emitter& e, const Instr* i) {
   if (!i->dest || !IsAlloc(i->dest)) return true;
   auto s1 = i->src1.value, s2 = i->src2.value;
-  if (!IsAlloc(s1) || !IsAlloc(s2)) { e.asm_().NOP(); return true; }
-  if (i->flags & ARITHMETIC_UNSIGNED) {
-    e.asm_().URHADD_4S(VR(i->dest), VR(s1), VR(s2));
-  } else {
-    e.asm_().SRHADD_4S(VR(i->dest), VR(s1), VR(s2));
+  if (!s1 || !s2) { e.asm_().NOP(); return true; }
+  VReg v1 = LoadVec128(e, s1, kVScratch0);
+  VReg v2 = LoadVec128(e, s2, kVScratch1);
+  VReg vd = VR(i->dest);
+  // Same flag packing as VECTOR_ADD.
+  const TypeName part_type = static_cast<TypeName>(i->flags & 0xFF);
+  const bool is_unsigned = !!((i->flags >> 8) & ARITHMETIC_UNSIGNED);
+  switch (part_type) {
+    case INT8_TYPE:
+      if (is_unsigned) e.asm_().URHADD_16B(vd, v1, v2);
+      else e.asm_().SRHADD_16B(vd, v1, v2);
+      return true;
+    case INT16_TYPE:
+      if (is_unsigned) e.asm_().URHADD_8H(vd, v1, v2);
+      else e.asm_().SRHADD_8H(vd, v1, v2);
+      return true;
+    case INT32_TYPE:
+      if (is_unsigned) e.asm_().URHADD_4S(vd, v1, v2);
+      else e.asm_().SRHADD_4S(vd, v1, v2);
+      return true;
+    default:
+      return false;
   }
-  return true;
 }
 
 static const vec128_t kLoadVectorShlTable[16] = {
@@ -2881,87 +3580,144 @@ static bool EmitPermute(A64Emitter& e, const Instr* i) {
   if (!i->dest || !IsAlloc(i->dest)) return true;
   auto ctrl = i->src1.value;
   auto s1 = i->src2.value, s2 = i->src3.value;
-  if (!IsAlloc(s1) || !IsAlloc(s2)) { e.asm_().NOP(); return true; }
-  if (ctrl && IsAlloc(ctrl)) {
-    // Use TBL for fully dynamic permute
-    e.asm_().TBL(VR(i->dest), VR(s1), VR(ctrl));
+  if (!ctrl || !s1 || !s2) { e.asm_().NOP(); return true; }
+  VReg vd = VR(i->dest);
+
+  // Sources go into V0/V1 — TBL2 requires a consecutive register pair.
+  if (VALUE_IS_CONSTANT(s1)) {
+    e.LoadConstantV128(kVScratch0, s1->constant.v128);
   } else {
-    e.asm_().MOV_16B(VR(i->dest), VR(s1));
+    e.asm_().MOV_16B(kVScratch0, VR(s1));
   }
-  return true;
+  if (VALUE_IS_CONSTANT(s2)) {
+    e.LoadConstantV128(kVScratch1, s2->constant.v128);
+  } else {
+    e.asm_().MOV_16B(kVScratch1, VR(s2));
+  }
+
+  if (i->flags == INT32_TYPE) {
+    // Word-granularity select; control must be a constant (as on x64).
+    if (!VALUE_IS_CONSTANT(ctrl)) return false;
+    const uint32_t mask = ctrl->constant.u32;
+    vec128_t idx = vec128b(0);
+    for (uint32_t w = 0; w < 4; ++w) {
+      const uint32_t lane = (mask >> (w * 8)) & 0x3;
+      const uint32_t sel = (mask >> (w * 8 + 2)) & 0x1;
+      for (uint32_t b = 0; b < 4; ++b) {
+        idx.u8[w * 4 + b] = static_cast<uint8_t>(sel * 16 + lane * 4 + b);
+      }
+    }
+    e.LoadConstantV128(kVScratch2, idx);
+    e.asm_().TBL2(vd, kVScratch0, kVScratch2);
+    return true;
+  }
+
+  if (i->flags == INT8_TYPE) {
+    // vperm: each guest control byte selects from the 32-byte guest
+    // concatenation. In host layout both the control byte position and the
+    // source byte position carry the ^3 word swizzle, so the host table
+    // index is (control & 0x1F) ^ 3.
+    if (VALUE_IS_CONSTANT(ctrl)) {
+      vec128_t idx = ctrl->constant.v128;
+      for (int b = 0; b < 16; ++b) {
+        idx.u8[b] = (idx.u8[b] & 0x1F) ^ 0x3;
+      }
+      e.LoadConstantV128(kVScratch2, idx);
+    } else {
+      e.asm_().MOVI_16B(kVScratch2, 0x1F);
+      e.asm_().AND_16B(kVScratch2, VR(ctrl), kVScratch2);
+      e.asm_().MOVI_16B(vd, 0x3);  // s1/s2 already copied; vd is free
+      e.asm_().EOR_16B(kVScratch2, kVScratch2, vd);
+    }
+    e.asm_().TBL2(vd, kVScratch0, kVScratch2);
+    return true;
+  }
+
+  return false;
 }
 
 static bool EmitSwizzle(A64Emitter& e, const Instr* i) {
   if (!i->dest || !IsAlloc(i->dest)) return true;
   auto src = i->src1.value;
-  if (!src || !IsAlloc(src)) { e.asm_().NOP(); return true; }
+  if (!src) { e.asm_().NOP(); return true; }
+  VReg vs = LoadVec128(e, src, kVScratch0);
   VReg vd = VR(i->dest);
-  VReg vs = VR(src);
-  // Swizzle mask is in flags — each 2 bits selects a lane (0-3)
-  uint32_t swizzle = i->flags;
-  uint32_t x = (swizzle >> 0) & 3;
-  uint32_t y = (swizzle >> 2) & 3;
-  uint32_t z = (swizzle >> 4) & 3;
-  uint32_t w = (swizzle >> 6) & 3;
-  // Build TBL index: each byte index = lane * 4 + byte_within_lane
-  // For 4S arrangement, each lane is 4 bytes
-  uint64_t lo = 0, hi = 0;
-  for (int b = 0; b < 4; b++) lo |= (uint64_t)(x * 4 + b) << (b * 8);
-  for (int b = 0; b < 4; b++) lo |= (uint64_t)(y * 4 + b) << ((4 + b) * 8);
-  for (int b = 0; b < 4; b++) hi |= (uint64_t)(z * 4 + b) << (b * 8);
-  for (int b = 0; b < 4; b++) hi |= (uint64_t)(w * 4 + b) << ((4 + b) * 8);
-  // Load index table into kVScratch0 and use TBL
-  vec128_t idx_vec;
-  idx_vec.low = lo;
-  idx_vec.high = hi;
-  e.LoadConstantV128(kVScratch0, idx_vec);
-  e.asm_().TBL(vd, vs, kVScratch0);
+  // The swizzle mask lives in src2.offset — each 2 bits selects a source
+  // word (flags carries the part type, which is always 32-bit here).
+  const uint32_t swizzle = static_cast<uint32_t>(i->src2.offset);
+  vec128_t idx = vec128b(0);
+  for (uint32_t w = 0; w < 4; ++w) {
+    const uint32_t lane = (swizzle >> (w * 2)) & 0x3;
+    for (uint32_t b = 0; b < 4; ++b) {
+      idx.u8[w * 4 + b] = static_cast<uint8_t>(lane * 4 + b);
+    }
+  }
+  e.LoadConstantV128(kVScratch2, idx);
+  e.asm_().TBL(vd, vs, kVScratch2);
+  return true;
+}
+
+// Runs a v128 -> v128 conversion through a C helper: src goes out via
+// helper_scratch, the result comes back the same way.
+static bool EmitVec128UnaryViaHelper(A64Emitter& e, const Instr* i,
+                                     const Value* src,
+                                     uint64_t helper_address) {
+  if (!i->dest || !IsAlloc(i->dest) || !src) return true;
+  const int32_t scratch_offset =
+      static_cast<int32_t>(offsetof(A64BackendContext, helper_scratch));
+  VReg src_reg = LoadVec128(e, src, kVScratch0);
+  e.asm_().SUB(kScratch1, kContextReg,
+               static_cast<uint32_t>(sizeof(A64BackendContext)));
+  e.asm_().STR_Q(src_reg, kScratch1, scratch_offset);
+  e.MovImm64(X1, 0);
+  e.MovImm64(X2, 0);
+  e.MovImm64(X0, helper_address);
+  auto backend = static_cast<A64Backend*>(e.backend());
+  e.MovImm64(kScratch0,
+             reinterpret_cast<uint64_t>(backend->guest_to_host_thunk()));
+  e.asm_().BLR(kScratch0);
+  e.asm_().SUB(kScratch1, kContextReg,
+               static_cast<uint32_t>(sizeof(A64BackendContext)));
+  e.asm_().LDR_Q(VR(i->dest), kScratch1, scratch_offset);
   return true;
 }
 
 static bool EmitPack(A64Emitter& e, const Instr* i) {
   if (!i->dest || !IsAlloc(i->dest)) return true;
   auto src1 = i->src1.value;
-  auto src2 = i->src2.value;
   VReg vd = VR(i->dest);
   uint32_t pack_mode = i->flags & PACK_TYPE_MODE;
 
-  // Default: copy src1 through
-  if (!src1 || !IsAlloc(src1)) {
+  if (!src1) {
     e.asm_().MOVI_4S_zero(vd);
     return true;
   }
 
   switch (pack_mode) {
-    case PACK_TYPE_8_IN_16: {
-      // Pack 8x 16-bit values into 8x 8-bit values (saturate)
-      // src1 has low 8 values, src2 has high 8 values
-      // Use SQXTN (signed) or UQXTN (unsigned) for narrowing
-      e.asm_().MOV_16B(vd, VR(src1));
-      break;
-    }
-    case PACK_TYPE_16_IN_32: {
-      // Pack 4x 32-bit values into 4x 16-bit values
-      e.asm_().MOV_16B(vd, VR(src1));
-      break;
-    }
-    case PACK_TYPE_D3DCOLOR: {
-      // ARGB float4 [0,1] -> packed D3DCOLOR uint32
-      // Clamp to [0,1], multiply by 255, convert to int, pack bytes
-      e.asm_().FRINTN_4S(kVScratch0, VR(src1));  // round to nearest
-      e.asm_().FCVTZS_4S(kVScratch0, VR(src1));  // float -> int
-      e.asm_().MOV_16B(vd, kVScratch0);
-      break;
-    }
+    case PACK_TYPE_D3DCOLOR:
+      return EmitVec128UnaryViaHelper(
+          e, i, src1, reinterpret_cast<uint64_t>(&A64PackD3DCOLOR));
     case PACK_TYPE_FLOAT16_2:
+      return EmitVec128UnaryViaHelper(
+          e, i, src1, reinterpret_cast<uint64_t>(&A64PackFLOAT16_2));
     case PACK_TYPE_FLOAT16_4:
+      return EmitVec128UnaryViaHelper(
+          e, i, src1, reinterpret_cast<uint64_t>(&A64PackFLOAT16_4));
     case PACK_TYPE_SHORT_2:
+      return EmitVec128UnaryViaHelper(
+          e, i, src1, reinterpret_cast<uint64_t>(&A64PackSHORT_2));
+    case PACK_TYPE_8_IN_16:
+    case PACK_TYPE_16_IN_32:
     case PACK_TYPE_SHORT_4:
     case PACK_TYPE_UINT_2101010:
     case PACK_TYPE_ULONG_4202020:
     default:
-      // Complex pack types — copy through for now
-      e.asm_().MOV_16B(vd, VR(src1));
+      // TODO: unimplemented pack modes — copy through for now
+      if (IsAlloc(src1)) {
+        e.asm_().MOV_16B(vd, VR(src1));
+      } else {
+        e.asm_().MOVI_4S_zero(vd);
+      }
       break;
   }
   return true;
@@ -2973,35 +3729,36 @@ static bool EmitUnpack(A64Emitter& e, const Instr* i) {
   VReg vd = VR(i->dest);
   uint32_t pack_mode = i->flags & PACK_TYPE_MODE;
 
-  if (!src || !IsAlloc(src)) {
+  if (!src) {
     e.asm_().MOVI_4S_zero(vd);
     return true;
   }
 
   switch (pack_mode) {
-    case PACK_TYPE_8_IN_16: {
-      // Unpack 8x 8-bit values to 8x 16-bit values
-      e.asm_().MOV_16B(vd, VR(src));
-      break;
-    }
-    case PACK_TYPE_16_IN_32: {
-      // Unpack 4x 16-bit values to 4x 32-bit values
-      e.asm_().MOV_16B(vd, VR(src));
-      break;
-    }
-    case PACK_TYPE_D3DCOLOR: {
-      // Unpack D3DCOLOR uint32 -> ARGB float4 [0,1]
-      e.asm_().SCVTF_4S(vd, VR(src));  // int -> float
-      break;
-    }
+    case PACK_TYPE_D3DCOLOR:
+      return EmitVec128UnaryViaHelper(
+          e, i, src, reinterpret_cast<uint64_t>(&A64UnpackD3DCOLOR));
     case PACK_TYPE_FLOAT16_2:
+      return EmitVec128UnaryViaHelper(
+          e, i, src, reinterpret_cast<uint64_t>(&A64UnpackFLOAT16_2));
     case PACK_TYPE_FLOAT16_4:
+      return EmitVec128UnaryViaHelper(
+          e, i, src, reinterpret_cast<uint64_t>(&A64UnpackFLOAT16_4));
     case PACK_TYPE_SHORT_2:
+      return EmitVec128UnaryViaHelper(
+          e, i, src, reinterpret_cast<uint64_t>(&A64UnpackSHORT_2));
+    case PACK_TYPE_8_IN_16:
+    case PACK_TYPE_16_IN_32:
     case PACK_TYPE_SHORT_4:
     case PACK_TYPE_UINT_2101010:
     case PACK_TYPE_ULONG_4202020:
     default:
-      e.asm_().MOV_16B(vd, VR(src));
+      // TODO: unimplemented unpack modes — copy through for now
+      if (IsAlloc(src)) {
+        e.asm_().MOV_16B(vd, VR(src));
+      } else {
+        e.asm_().MOVI_4S_zero(vd);
+      }
       break;
   }
   return true;

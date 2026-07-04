@@ -4,6 +4,7 @@
 #include "xenia/cpu/backend/a64/a64_backend.h"
 
 #include <atomic>
+#include <cfenv>
 #include <mutex>
 #include <unordered_set>
 
@@ -326,17 +327,27 @@ bool A64Backend::Initialize(Processor* processor) {
   // call target, restore, return.
   thunk_asm.Reset();
   {
-    // Save x19 (context) to stack since target may clobber it
-    thunk_asm.STP_pre(X29, X30, SP, -32);
+    // V16-V31 are the JIT's allocated guest vector registers but are
+    // caller-saved in AAPCS64 — the host callee may clobber them, so the
+    // thunk must preserve all 128 bits of each across the call.
+    thunk_asm.STP_pre(X29, X30, SP, -(32 + 16 * 16));
     thunk_asm.ADD(X29, SP, 0);
+    for (uint32_t v = 0; v < 16; v += 2) {
+      thunk_asm.STP_Q(static_cast<VReg>(V16 + v),
+                      static_cast<VReg>(V16 + v + 1), SP, 32 + v * 16);
+    }
     // Save the target fn pointer
     thunk_asm.MOV(X9, X0);
     // Set args: x0 = context (x19), x1 = arg0, x2 = arg1
     thunk_asm.MOV(X0, X19);  // context
     // x1, x2 already have arg0, arg1
     thunk_asm.BLR(X9);
+    for (uint32_t v = 0; v < 16; v += 2) {
+      thunk_asm.LDP_Q(static_cast<VReg>(V16 + v),
+                      static_cast<VReg>(V16 + v + 1), SP, 32 + v * 16);
+    }
     // Restore frame and return
-    thunk_asm.LDP_post(X29, X30, SP, 32);
+    thunk_asm.LDP_post(X29, X30, SP, 32 + 16 * 16);
     thunk_asm.RET();
   }
   thunk_info.code_size.total = thunk_asm.code_size();
@@ -450,10 +461,14 @@ void A64Backend::PrepareForReentry(void* ctx) {
 }
 
 void A64Backend::SetGuestRoundingMode(void* ctx, unsigned int mode) {
-  // ARM64 FPCR rounding mode is in bits [23:22]
-  // 00 = Round to Nearest, 01 = Round to +Inf,
-  // 10 = Round to -Inf,    11 = Round to Zero
-  // This is called from interpreter path; JIT uses SET_ROUNDING_MODE opcode
+  // PPC FPSCR[RN]: 0=nearest, 1=toward zero, 2=+inf, 3=-inf.
+  // Applies to the calling thread, which is the one executing guest code.
+  switch (mode & 3) {
+    case 0: std::fesetround(FE_TONEAREST); break;
+    case 1: std::fesetround(FE_TOWARDZERO); break;
+    case 2: std::fesetround(FE_UPWARD); break;
+    case 3: std::fesetround(FE_DOWNWARD); break;
+  }
 }
 
 uint32_t A64Backend::CreateGuestTrampoline(GuestTrampolineProc proc,

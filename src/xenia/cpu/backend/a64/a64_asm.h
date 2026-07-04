@@ -218,6 +218,21 @@ class A64Asm {
   void RORv(GReg rd, GReg rn, GReg rm) {
     Emit(0x9AC02C00 | (rm << 16) | (rn << 5) | rd);
   }
+  // 32-bit variable shifts (amount taken mod 32, matching x86 CL semantics
+  // for 8/16/32-bit operands)
+  void LSLVw(GReg rd, GReg rn, GReg rm) {
+    Emit(0x1AC02000 | (rm << 16) | (rn << 5) | rd);
+  }
+  void LSRVw(GReg rd, GReg rn, GReg rm) {
+    Emit(0x1AC02400 | (rm << 16) | (rn << 5) | rd);
+  }
+  void ASRVw(GReg rd, GReg rn, GReg rm) {
+    Emit(0x1AC02800 | (rm << 16) | (rn << 5) | rd);
+  }
+  void RORVw(GReg rd, GReg rn, GReg rm) {
+    Emit(0x1AC02C00 | (rm << 16) | (rn << 5) | rd);
+  }
+  void NEGw(GReg rd, GReg rm) { Emit(0x4B000000 | (rm << 16) | (XZR << 5) | rd); }
 
   // Bit manipulation
   void CLZ(GReg rd, GReg rn) { Emit(0xDAC01000 | (rn << 5) | rd); }
@@ -683,7 +698,7 @@ class A64Asm {
     Emit(0x4E040400 | ((idx * 4 + 4) << 16) | (vn << 5) | vd);
   }
 
-  // NEON variable shifts (4S) — shift amount per-lane
+  // NEON variable shifts — per-lane shift amount; negative shifts right
   void USHL_4S(VReg vd, VReg vn, VReg vm) {
     Emit(0x6EA04400 | (vm << 16) | (vn << 5) | vd);
   }
@@ -693,8 +708,60 @@ class A64Asm {
   void NEG_4S(VReg vd, VReg vn) {
     Emit(0x6EA0B800 | (vn << 5) | vd);
   }
+  void USHL_16B(VReg vd, VReg vn, VReg vm) {
+    Emit(0x6E204400 | (vm << 16) | (vn << 5) | vd);
+  }
+  void SSHL_16B(VReg vd, VReg vn, VReg vm) {
+    Emit(0x4E204400 | (vm << 16) | (vn << 5) | vd);
+  }
+  void NEG_16B(VReg vd, VReg vn) {
+    Emit(0x6E20B800 | (vn << 5) | vd);
+  }
+  void USHL_8H(VReg vd, VReg vn, VReg vm) {
+    Emit(0x6E604400 | (vm << 16) | (vn << 5) | vd);
+  }
+  void SSHL_8H(VReg vd, VReg vn, VReg vm) {
+    Emit(0x4E604400 | (vm << 16) | (vn << 5) | vd);
+  }
+  void NEG_8H(VReg vd, VReg vn) {
+    Emit(0x6E60B800 | (vn << 5) | vd);
+  }
 
-  // NEON integer min/max (4S)
+  // NEON integer add/sub, 16B/8H (4S variants above)
+  void ADD_16B(VReg vd, VReg vn, VReg vm) {
+    Emit(0x4E208400 | (vm << 16) | (vn << 5) | vd);
+  }
+  void SUB_16B(VReg vd, VReg vn, VReg vm) {
+    Emit(0x6E208400 | (vm << 16) | (vn << 5) | vd);
+  }
+  void ADD_8H(VReg vd, VReg vn, VReg vm) {
+    Emit(0x4E608400 | (vm << 16) | (vn << 5) | vd);
+  }
+  void SUB_8H(VReg vd, VReg vn, VReg vm) {
+    Emit(0x6E608400 | (vm << 16) | (vn << 5) | vd);
+  }
+
+  // NEON saturating add
+  void SQADD_16B(VReg vd, VReg vn, VReg vm) {
+    Emit(0x4E200C00 | (vm << 16) | (vn << 5) | vd);
+  }
+  void SQADD_8H(VReg vd, VReg vn, VReg vm) {
+    Emit(0x4E600C00 | (vm << 16) | (vn << 5) | vd);
+  }
+  void SQADD_4S(VReg vd, VReg vn, VReg vm) {
+    Emit(0x4EA00C00 | (vm << 16) | (vn << 5) | vd);
+  }
+  void UQADD_16B(VReg vd, VReg vn, VReg vm) {
+    Emit(0x6E200C00 | (vm << 16) | (vn << 5) | vd);
+  }
+  void UQADD_8H(VReg vd, VReg vn, VReg vm) {
+    Emit(0x6E600C00 | (vm << 16) | (vn << 5) | vd);
+  }
+  void UQADD_4S(VReg vd, VReg vn, VReg vm) {
+    Emit(0x6EA00C00 | (vm << 16) | (vn << 5) | vd);
+  }
+
+  // NEON integer min/max
   void SMAX_4S(VReg vd, VReg vn, VReg vm) {
     Emit(0x4EA06400 | (vm << 16) | (vn << 5) | vd);
   }
@@ -707,13 +774,115 @@ class A64Asm {
   void UMIN_4S(VReg vd, VReg vn, VReg vm) {
     Emit(0x6EA06C00 | (vm << 16) | (vn << 5) | vd);
   }
+  void SMAX_16B(VReg vd, VReg vn, VReg vm) {
+    Emit(0x4E206400 | (vm << 16) | (vn << 5) | vd);
+  }
+  void SMIN_16B(VReg vd, VReg vn, VReg vm) {
+    Emit(0x4E206C00 | (vm << 16) | (vn << 5) | vd);
+  }
+  void UMAX_16B(VReg vd, VReg vn, VReg vm) {
+    Emit(0x6E206400 | (vm << 16) | (vn << 5) | vd);
+  }
+  void UMIN_16B(VReg vd, VReg vn, VReg vm) {
+    Emit(0x6E206C00 | (vm << 16) | (vn << 5) | vd);
+  }
+  void SMAX_8H(VReg vd, VReg vn, VReg vm) {
+    Emit(0x4E606400 | (vm << 16) | (vn << 5) | vd);
+  }
+  void SMIN_8H(VReg vd, VReg vn, VReg vm) {
+    Emit(0x4E606C00 | (vm << 16) | (vn << 5) | vd);
+  }
+  void UMAX_8H(VReg vd, VReg vn, VReg vm) {
+    Emit(0x6E606400 | (vm << 16) | (vn << 5) | vd);
+  }
+  void UMIN_8H(VReg vd, VReg vn, VReg vm) {
+    Emit(0x6E606C00 | (vm << 16) | (vn << 5) | vd);
+  }
 
-  // NEON rounding halving add (unsigned average)
-  void URHADD_4S(VReg vd, VReg vn, VReg vm) {
+  // NEON MOVI immediate splats (imm8 encoded as abc:defgh)
+  void MOVI_16B(VReg vd, uint8_t imm8) {
+    Emit(0x4F00E400 | (uint32_t(imm8 >> 5) << 16) |
+         (uint32_t(imm8 & 0x1F) << 5) | vd);
+  }
+  void MOVI_8H(VReg vd, uint8_t imm8) {
+    Emit(0x4F008400 | (uint32_t(imm8 >> 5) << 16) |
+         (uint32_t(imm8 & 0x1F) << 5) | vd);
+  }
+  void MOVI_4S(VReg vd, uint8_t imm8) {
+    Emit(0x4F000400 | (uint32_t(imm8 >> 5) << 16) |
+         (uint32_t(imm8 & 0x1F) << 5) | vd);
+  }
+
+  // NEON rounding halving add (average)
+  void URHADD_16B(VReg vd, VReg vn, VReg vm) {
     Emit(0x6E201400 | (vm << 16) | (vn << 5) | vd);
   }
-  void SRHADD_4S(VReg vd, VReg vn, VReg vm) {
+  void URHADD_8H(VReg vd, VReg vn, VReg vm) {
+    Emit(0x6E601400 | (vm << 16) | (vn << 5) | vd);
+  }
+  void URHADD_4S(VReg vd, VReg vn, VReg vm) {
+    Emit(0x6EA01400 | (vm << 16) | (vn << 5) | vd);
+  }
+  void SRHADD_16B(VReg vd, VReg vn, VReg vm) {
     Emit(0x4E201400 | (vm << 16) | (vn << 5) | vd);
+  }
+  void SRHADD_8H(VReg vd, VReg vn, VReg vm) {
+    Emit(0x4E601400 | (vm << 16) | (vn << 5) | vd);
+  }
+  void SRHADD_4S(VReg vd, VReg vn, VReg vm) {
+    Emit(0x4EA01400 | (vm << 16) | (vn << 5) | vd);
+  }
+
+  // NEON saturating sub
+  void SQSUB_16B(VReg vd, VReg vn, VReg vm) {
+    Emit(0x4E202C00 | (vm << 16) | (vn << 5) | vd);
+  }
+  void SQSUB_8H(VReg vd, VReg vn, VReg vm) {
+    Emit(0x4E602C00 | (vm << 16) | (vn << 5) | vd);
+  }
+  void SQSUB_4S(VReg vd, VReg vn, VReg vm) {
+    Emit(0x4EA02C00 | (vm << 16) | (vn << 5) | vd);
+  }
+  void UQSUB_16B(VReg vd, VReg vn, VReg vm) {
+    Emit(0x6E202C00 | (vm << 16) | (vn << 5) | vd);
+  }
+  void UQSUB_8H(VReg vd, VReg vn, VReg vm) {
+    Emit(0x6E602C00 | (vm << 16) | (vn << 5) | vd);
+  }
+  void UQSUB_4S(VReg vd, VReg vn, VReg vm) {
+    Emit(0x6EA02C00 | (vm << 16) | (vn << 5) | vd);
+  }
+
+  // NEON compares, 16B/8H (4S variants above)
+  void CMEQ_16B(VReg vd, VReg vn, VReg vm) {
+    Emit(0x6E208C00 | (vm << 16) | (vn << 5) | vd);
+  }
+  void CMGT_16B(VReg vd, VReg vn, VReg vm) {
+    Emit(0x4E203400 | (vm << 16) | (vn << 5) | vd);
+  }
+  void CMGE_16B(VReg vd, VReg vn, VReg vm) {
+    Emit(0x4E203C00 | (vm << 16) | (vn << 5) | vd);
+  }
+  void CMHI_16B(VReg vd, VReg vn, VReg vm) {
+    Emit(0x6E203400 | (vm << 16) | (vn << 5) | vd);
+  }
+  void CMHS_16B(VReg vd, VReg vn, VReg vm) {
+    Emit(0x6E203C00 | (vm << 16) | (vn << 5) | vd);
+  }
+  void CMEQ_8H(VReg vd, VReg vn, VReg vm) {
+    Emit(0x6E608C00 | (vm << 16) | (vn << 5) | vd);
+  }
+  void CMGT_8H(VReg vd, VReg vn, VReg vm) {
+    Emit(0x4E603400 | (vm << 16) | (vn << 5) | vd);
+  }
+  void CMGE_8H(VReg vd, VReg vn, VReg vm) {
+    Emit(0x4E603C00 | (vm << 16) | (vn << 5) | vd);
+  }
+  void CMHI_8H(VReg vd, VReg vn, VReg vm) {
+    Emit(0x6E603400 | (vm << 16) | (vn << 5) | vd);
+  }
+  void CMHS_8H(VReg vd, VReg vn, VReg vm) {
+    Emit(0x6E603C00 | (vm << 16) | (vn << 5) | vd);
   }
 
   // NEON vector int<->float conversions
@@ -759,6 +928,32 @@ class A64Asm {
     // UMOV Wd, Vn.S[idx]
     uint32_t imm5 = (idx << 3) | 0x4;
     Emit(0x0E003C00 | (imm5 << 16) | (vn << 5) | rd);
+  }
+  void UMOV_B(GReg rd, VReg vn, uint32_t idx) {
+    // UMOV Wd, Vn.B[idx]
+    uint32_t imm5 = (idx << 1) | 0x1;
+    Emit(0x0E003C00 | (imm5 << 16) | (vn << 5) | rd);
+  }
+  void UMOV_H(GReg rd, VReg vn, uint32_t idx) {
+    // UMOV Wd, Vn.H[idx]
+    uint32_t imm5 = (idx << 2) | 0x2;
+    Emit(0x0E003C00 | (imm5 << 16) | (vn << 5) | rd);
+  }
+  void INS_B_GPR(VReg vd, uint32_t idx, GReg rn) {
+    // INS Vd.B[idx], Wn
+    uint32_t imm5 = (idx << 1) | 0x1;
+    Emit(0x4E001C00 | (imm5 << 16) | (rn << 5) | vd);
+  }
+  void INS_H_GPR(VReg vd, uint32_t idx, GReg rn) {
+    // INS Vd.H[idx], Wn
+    uint32_t imm5 = (idx << 2) | 0x2;
+    Emit(0x4E001C00 | (imm5 << 16) | (rn << 5) | vd);
+  }
+  // REV32 Vd.16B, Vn.16B — reverse bytes within each 32-bit word
+  void REV32_16B(VReg vd, VReg vn) { Emit(0x6E200800 | (vn << 5) | vd); }
+  // TBL Vd.16B, {Vn.16B, V(n+1).16B}, Vm.16B — two-register table lookup
+  void TBL2(VReg vd, VReg vn, VReg vm) {
+    Emit(0x4E002000 | (vm << 16) | (vn << 5) | vd);
   }
   void INS_S_GPR(VReg vd, uint32_t idx, GReg rn) {
     // INS Vd.S[idx], Wn
