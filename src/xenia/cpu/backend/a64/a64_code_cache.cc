@@ -71,8 +71,25 @@ bool PosixA64CodeCache::Initialize() {
   generated_code_execute_base_ = reinterpret_cast<uint8_t*>(jit_region_);
   generated_code_write_base_ = generated_code_execute_base_;
 
-  // Skip indirection table on ARM64 — we use the resolve thunk instead
-  indirection_table_base_ = nullptr;
+  // Reserve the indirection table at an arbitrary address — the canonical
+  // 0x80000000 host address sits inside PAGEZERO on macOS. Slots hold 32-bit
+  // offsets into the JIT region (0 = unresolved). The whole table is mapped
+  // read-write: pages are lazily zero-filled on first touch, so fast-path
+  // loads can never fault regardless of the guest target, and untouched
+  // pages cost no real memory.
+  void* table = mmap(nullptr, kIndirectionTableSize, PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+  if (table == MAP_FAILED) {
+    XELOGW(
+        "ARM64: failed to reserve indirection table ({}); indirect calls "
+        "will always go through the resolve thunk",
+        strerror(errno));
+    indirection_table_base_ = nullptr;
+  } else {
+    indirection_table_base_ = reinterpret_cast<uint8_t*>(table);
+    XELOGI("ARM64: indirection table reserved at {:p} ({} MB)", table,
+           kIndirectionTableSize / (1024 * 1024));
+  }
 
   // Initialize the generated code offset
   generated_code_offset_ = 0;

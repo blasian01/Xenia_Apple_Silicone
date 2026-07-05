@@ -29,15 +29,8 @@ bool A64Function::CallImpl(ThreadState* thread_state, uint32_t return_address) {
   auto backend =
       reinterpret_cast<A64Backend*>(thread_state->processor()->backend());
   auto thunk = backend->host_to_guest_thunk();
-  auto* context = thread_state->context();
-  XELOGI(
-      "ARM64: CallImpl guest={:08X} machine_code={:p} thunk={:p} r1={:08X} "
-      "r13={:08X} lr={:08X} ctr={:08X}",
-      address(), (void*)machine_code_, (void*)thunk, uint32_t(context->r[1]),
-      uint32_t(context->r[13]), uint32_t(context->lr), uint32_t(context->ctr));
   thunk(machine_code_, thread_state->context(),
         reinterpret_cast<void*>(uintptr_t(return_address)));
-  XELOGI("ARM64: CallImpl returned from guest={:08X}", address());
   return true;
 }
 

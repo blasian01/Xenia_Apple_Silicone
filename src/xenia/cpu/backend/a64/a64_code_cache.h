@@ -22,6 +22,12 @@ class A64CodeCache : public CodeCacheBase<A64CodeCache> {
   void* LookupUnwindInfo(uint64_t host_pc) override { return nullptr; }
 
   // CRTP hooks.
+  uint32_t IndirectionSlotValue(void* code_execute_address) {
+    // Slots hold 32-bit offsets into the JIT region (0 = unresolved) — the
+    // region sits above 4GB on macOS so truncated addresses won't round-trip.
+    return uint32_t(reinterpret_cast<uint8_t*>(code_execute_address) -
+                    generated_code_execute_base_);
+  }
   void FillCode(void* write_address, size_t size);
   void FlushCodeRange(void* address, size_t size);
   void OnCodePlaced(uint32_t guest_address, GuestFunction* function_info,

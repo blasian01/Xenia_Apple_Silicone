@@ -30,6 +30,11 @@ class X64CodeCache : public CodeCacheBase<X64CodeCache> {
   void* LookupUnwindInfo(uint64_t host_pc) override { return nullptr; }
 
   // CRTP hooks for CodeCacheBase.
+  uint32_t IndirectionSlotValue(void* code_execute_address) {
+    // Call sites load the slot and jump to it directly; the code cache lives
+    // below 4GB on x64 so the truncated host address round-trips.
+    return uint32_t(reinterpret_cast<uintptr_t>(code_execute_address));
+  }
   void FillCode(void* write_address, size_t size);
   void FlushCodeRange(void* address, size_t size);
   void OnCodePlaced(uint32_t guest_address, GuestFunction* function_info,

@@ -394,6 +394,10 @@ class A64Asm {
     assert(offset >= 0);
     Emit(0x39400000 | ((offset & 0xFFF) << 10) | (rn << 5) | rt);
   }
+  // LDR Wt, [Xn, Xm] — 32-bit load, register offset, no shift
+  void LDRw_reg(GReg rt, GReg rn, GReg rm) {
+    Emit(0xB8606800 | (rm << 16) | (rn << 5) | rt);
+  }
   void STRH(GReg rt, GReg rn, int32_t offset = 0) {
     assert((offset & 1) == 0 && offset >= 0);
     Emit(0x79000000 | (((offset / 2) & 0xFFF) << 10) | (rn << 5) | rt);

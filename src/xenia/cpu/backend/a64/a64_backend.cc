@@ -150,7 +150,7 @@ extern "C" uint64_t A64ResolveFunction(void* raw_context,
   static std::mutex hot_target_log_mutex;
   static std::unordered_set<uint32_t> hot_target_log_once;
   auto count = ++resolve_count;
-  if (count <= 10 || (count % 100) == 0) {
+  if (count <= 10 || (count % 1000000) == 0) {
     XELOGI("ARM64: ResolveFunction #{} target={:08X}", count, target_address);
   }
 
@@ -202,7 +202,13 @@ extern "C" uint64_t A64ResolveFunction(void* raw_context,
     }
   }
 
-  return reinterpret_cast<uint64_t>(a64_fn->machine_code());
+  auto backend =
+      static_cast<A64Backend*>(thread_state->processor()->backend());
+  const uint64_t host_address =
+      reinterpret_cast<uint64_t>(a64_fn->machine_code());
+  backend->TryPatchIndirection(guest_target, host_address);
+
+  return host_address;
 }
 
 A64Backend::A64Backend() {
@@ -396,11 +402,10 @@ bool A64Backend::Initialize(Processor* processor) {
   resolve_function_thunk_ =
       reinterpret_cast<ResolveFunctionThunk>(resolve_execute);
 
-  // Set indirection table default to resolve thunk address
   if (code_cache_->has_indirection_table()) {
-    code_cache_->set_indirection_default(
-        static_cast<uint32_t>(reinterpret_cast<uintptr_t>(
-            resolve_function_thunk_)));
+    // Slots hold offsets into the JIT region; 0 means unresolved (call sites
+    // fall back to the resolve thunk).
+    code_cache_->set_indirection_default(0);
   }
 
   // Emitter data pointer (no constant pool needed yet)
@@ -420,6 +425,23 @@ bool A64Backend::Initialize(Processor* processor) {
 void A64Backend::CommitExecutableRange(uint32_t guest_low,
                                        uint32_t guest_high) {
   code_cache_->CommitExecutableRange(guest_low, guest_high);
+}
+
+void A64Backend::TryPatchIndirection(uint32_t guest_address,
+                                     uint64_t host_address) {
+  if (!code_cache_->has_indirection_table()) {
+    return;
+  }
+  if (guest_address < 0x80000000u || guest_address >= 0xA0000000u) {
+    return;  // outside the table's guest range
+  }
+  const uint64_t jit_base = code_cache_->execute_base_address();
+  if (host_address < jit_base ||
+      host_address - jit_base > 0xFFFFFFFFull) {
+    return;  // outside the JIT region (e.g. trampoline memory)
+  }
+  code_cache_->AddIndirection(guest_address,
+                              static_cast<uint32_t>(host_address - jit_base));
 }
 
 std::unique_ptr<Assembler> A64Backend::CreateAssembler() {

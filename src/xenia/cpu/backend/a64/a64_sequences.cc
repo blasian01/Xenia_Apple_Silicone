@@ -4,11 +4,13 @@
 #include "xenia/cpu/backend/a64/a64_sequences.h"
 
 #include <atomic>
+#include <cmath>
 #include <cstring>
 
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/cpu/backend/a64/a64_backend.h"
+#include "xenia/cpu/backend/a64/a64_code_cache.h"
 #include "xenia/cpu/backend/a64/a64_emitter.h"
 #include "xenia/cpu/backend/a64/a64_function.h"
 #include "xenia/cpu/backend/a64/a64_stack_layout.h"
@@ -719,6 +721,57 @@ extern "C" uint64_t A64UnpackSHORT_2(void* raw_context, uint64_t arg0,
   return 0;
 }
 
+// POW2/LOG2 (PPC vexptefp/vlogefp and scalar HIR ops) via C helpers.
+// arg0 selects the operand shape: 0 = f32 lane 0, 1 = f64 lane 0, 2 = all
+// four f32 lanes.
+extern "C" uint64_t A64Pow2(void* raw_context, uint64_t shape,
+                            uint64_t unused) {
+  auto* backend_context = A64GetBackendContext(raw_context);
+  auto* value = reinterpret_cast<vec128_t*>(backend_context->helper_scratch);
+  switch (shape) {
+    case 0:
+      value->f32[0] = std::exp2(value->f32[0]);
+      break;
+    case 1: {
+      double d;
+      std::memcpy(&d, &value->u64[0], sizeof(d));
+      d = std::exp2(d);
+      std::memcpy(&value->u64[0], &d, sizeof(d));
+      break;
+    }
+    default:
+      for (int i = 0; i < 4; ++i) {
+        value->f32[i] = std::exp2(value->f32[i]);
+      }
+      break;
+  }
+  return 0;
+}
+
+extern "C" uint64_t A64Log2(void* raw_context, uint64_t shape,
+                            uint64_t unused) {
+  auto* backend_context = A64GetBackendContext(raw_context);
+  auto* value = reinterpret_cast<vec128_t*>(backend_context->helper_scratch);
+  switch (shape) {
+    case 0:
+      value->f32[0] = std::log2(value->f32[0]);
+      break;
+    case 1: {
+      double d;
+      std::memcpy(&d, &value->u64[0], sizeof(d));
+      d = std::log2(d);
+      std::memcpy(&value->u64[0], &d, sizeof(d));
+      break;
+    }
+    default:
+      for (int i = 0; i < 4; ++i) {
+        value->f32[i] = std::log2(value->f32[i]);
+      }
+      break;
+  }
+  return 0;
+}
+
 extern "C" uint64_t A64LogPossibleGuestReturnMismatch(void* raw_context,
                                                       uint64_t guest_function,
                                                       uint64_t packed_values) {
@@ -1274,6 +1327,45 @@ static bool EmitCallTrue(A64Emitter& e, const Instr* i) {
   return EmitGuestFunctionCall(e, i, i->src2.symbol);
 }
 
+// Branches to a guest target held in X9, taking the indirection-table fast
+// path when the target's slot is populated (32-bit offset into the JIT
+// region, 0 = unresolved) and falling back to the resolve thunk otherwise.
+// The resolve path patches the slot, so each target resolves at most once.
+static void EmitIndirectCallTarget(A64Emitter& e, const Instr* i) {
+  auto backend = static_cast<A64Backend*>(e.backend());
+  auto code_cache = backend->code_cache();
+  if (!code_cache->has_indirection_table()) {
+    e.MovImm64(kScratch1,
+               reinterpret_cast<uint64_t>(backend->resolve_function_thunk()));
+    EmitCallOrTailBranch(e, i, kScratch1);
+    return;
+  }
+
+  a64::Label resolve, done;
+  // NOTE: X9 (kScratch0) holds the guest target and must survive into the
+  // resolve path, so only kScratch1/kScratch2 are usable here.
+  // Only [0x80000000, 0xA0000000) has table pages: (target >> 29) == 4.
+  e.asm_().LSR_imm(kScratch1, X9, 29);
+  e.asm_().SUB_imm(kScratch1, kScratch1, 4);
+  e.asm_().CBNZ(kScratch1, &resolve);
+  // slot = table_base + (target - 0x80000000); the bias is folded into the
+  // constant (unsigned wrap-around is fine).
+  e.MovImm64(kScratch2,
+             reinterpret_cast<uint64_t>(code_cache->indirection_table_base()) -
+                 0x80000000ull);
+  e.asm_().LDRw_reg(kScratch2, kScratch2, X9);
+  e.asm_().CBZ(kScratch2, &resolve);
+  e.MovImm64(kScratch1, code_cache->execute_base_address());
+  e.asm_().ADD(kScratch1, kScratch1, kScratch2);
+  EmitCallOrTailBranch(e, i, kScratch1);
+  e.asm_().B(&done);
+  e.asm_().Bind(&resolve);
+  e.MovImm64(kScratch1,
+             reinterpret_cast<uint64_t>(backend->resolve_function_thunk()));
+  EmitCallOrTailBranch(e, i, kScratch1);
+  e.asm_().Bind(&done);
+}
+
 static bool EmitCallIndirect(A64Emitter& e, const Instr* i) {
   auto target = i->src1.value;
   if (!target) return true;
@@ -1298,11 +1390,8 @@ static bool EmitCallIndirect(A64Emitter& e, const Instr* i) {
 
   PrepareGuestCallReturnAddress(e, i);
 
-  // Load PPC target address into x9
-  // Call resolve thunk — it will resolve PPC addr and jump
-  e.MovImm64(kScratch1,
-             reinterpret_cast<uint64_t>(backend->resolve_function_thunk()));
-  EmitCallOrTailBranch(e, i, kScratch1);
+  // X9 holds the guest target; branch via the indirection table.
+  EmitIndirectCallTarget(e, i);
   return true;
 }
 
@@ -1333,9 +1422,7 @@ static bool EmitCallIndirectTrue(A64Emitter& e, const Instr* i) {
       e.asm_().Bind(&nonzero_target);
       MaybeEmitPossibleGuestReturn(e, i, X9);
       PrepareGuestCallReturnAddress(e, i);
-      e.MovImm64(kScratch1,
-                 reinterpret_cast<uint64_t>(backend->resolve_function_thunk()));
-      EmitCallOrTailBranch(e, i, kScratch1);
+      EmitIndirectCallTarget(e, i);
     }
     e.asm_().Bind(&skip);
     return true;
@@ -1362,9 +1449,7 @@ static bool EmitCallIndirectTrue(A64Emitter& e, const Instr* i) {
   e.asm_().Bind(&nonzero_target);
   MaybeEmitPossibleGuestReturn(e, i, X9);
   PrepareGuestCallReturnAddress(e, i);
-  e.MovImm64(kScratch1,
-             reinterpret_cast<uint64_t>(backend->resolve_function_thunk()));
-  EmitCallOrTailBranch(e, i, kScratch1);
+  EmitIndirectCallTarget(e, i);
   return true;
 }
 
@@ -2869,56 +2954,37 @@ static bool EmitMulSub(A64Emitter& e, const Instr* i) {
   return true;
 }
 
+static bool EmitVec128UnaryViaHelper(A64Emitter& e, const Instr* i,
+                                     const Value* src, uint64_t helper_address,
+                                     uint64_t arg0);
+
+// POW2/LOG2 route through C helpers (std::exp2 / std::log2), matching the
+// x64 backend's emulation path. The shape selector (arg0) picks f32 lane 0,
+// f64 lane 0, or all four f32 lanes.
+static uint64_t Pow2Log2Shape(TypeName type) {
+  switch (type) {
+    case FLOAT32_TYPE: return 0;
+    case FLOAT64_TYPE: return 1;
+    default: return 2;
+  }
+}
+
 static bool EmitPow2(A64Emitter& e, const Instr* i) {
-  // 2^x: convert int to float, then use as exponent
-  // For scalar float input: result = exp2f(src)
-  // Approximation: SCVTF to get float, then reconstruct via bit manipulation
   if (!i->dest || !IsAlloc(i->dest)) return true;
   auto src = i->src1.value;
-  if (!src || !IsAlloc(src)) { e.asm_().NOP(); return true; }
-  VReg vd = VR(i->dest);
-  if (src->type == FLOAT32_TYPE || src->type == FLOAT64_TYPE) {
-    // For FP input: 2^x ≈ convert to int, add to exponent bias, shift
-    // Simplified: use FRINTZ to get integer part, then reconstruct
-    if (src->type == FLOAT32_TYPE) {
-      e.asm_().FRINTZ_S(kVScratch0, VR(src));  // floor(x)
-      e.asm_().FCVTZS_S(kScratch0, kVScratch0);  // int(floor(x))
-      // 2^n = (n + 127) << 23 for float32
-      e.asm_().ADD_imm(kScratch0, kScratch0, 127);
-      e.asm_().LSL_imm(kScratch0, kScratch0, 23);
-      e.asm_().FMOV_SW(vd, kScratch0);  // move to FP reg
-    } else {
-      e.asm_().FRINTZ_D(kVScratch0, VR(src));
-      e.asm_().FCVTZS(kScratch0, kVScratch0);
-      e.asm_().ADD_imm(kScratch0, kScratch0, 1023);
-      e.asm_().LSL_imm(kScratch0, kScratch0, 52);
-      e.asm_().FMOV_DX(vd, kScratch0);
-    }
-  } else {
-    // Integer input: 2^x via shift
-    e.MovImm64(kScratch1, 1);
-    e.asm_().LSLv(GR(i->dest), kScratch1, GR(src));
-  }
-  return true;
+  if (!src) { e.asm_().NOP(); return true; }
+  return EmitVec128UnaryViaHelper(e, i, src,
+                                  reinterpret_cast<uint64_t>(&A64Pow2),
+                                  Pow2Log2Shape(i->dest->type));
 }
 
 static bool EmitLog2(A64Emitter& e, const Instr* i) {
-  // log2(x): extract exponent from IEEE float
   if (!i->dest || !IsAlloc(i->dest)) return true;
   auto src = i->src1.value;
-  if (!src || !IsAlloc(src)) { e.asm_().NOP(); return true; }
-  VReg vd = VR(i->dest);
-  if (src->type == FLOAT32_TYPE) {
-    // Extract exponent: (bits >> 23) & 0xFF - 127
-    e.asm_().FMOV_WS(kScratch0, VR(src));
-    e.asm_().LSR_imm(kScratch0, kScratch0, 23);
-    e.asm_().AND_imm(kScratch0, kScratch0, 0xFF);
-    e.asm_().SUB_imm(kScratch0, kScratch0, 127);
-    e.asm_().SCVTF_S(vd, kScratch0);
-  } else {
-    e.asm_().NOP();  // Double log2 less common
-  }
-  return true;
+  if (!src) { e.asm_().NOP(); return true; }
+  return EmitVec128UnaryViaHelper(e, i, src,
+                                  reinterpret_cast<uint64_t>(&A64Log2),
+                                  Pow2Log2Shape(i->dest->type));
 }
 
 static bool EmitDotProduct3(A64Emitter& e, const Instr* i) {
@@ -3660,8 +3726,8 @@ static bool EmitSwizzle(A64Emitter& e, const Instr* i) {
 // Runs a v128 -> v128 conversion through a C helper: src goes out via
 // helper_scratch, the result comes back the same way.
 static bool EmitVec128UnaryViaHelper(A64Emitter& e, const Instr* i,
-                                     const Value* src,
-                                     uint64_t helper_address) {
+                                     const Value* src, uint64_t helper_address,
+                                     uint64_t arg0) {
   if (!i->dest || !IsAlloc(i->dest) || !src) return true;
   const int32_t scratch_offset =
       static_cast<int32_t>(offsetof(A64BackendContext, helper_scratch));
@@ -3669,7 +3735,7 @@ static bool EmitVec128UnaryViaHelper(A64Emitter& e, const Instr* i,
   e.asm_().SUB(kScratch1, kContextReg,
                static_cast<uint32_t>(sizeof(A64BackendContext)));
   e.asm_().STR_Q(src_reg, kScratch1, scratch_offset);
-  e.MovImm64(X1, 0);
+  e.MovImm64(X1, arg0);
   e.MovImm64(X2, 0);
   e.MovImm64(X0, helper_address);
   auto backend = static_cast<A64Backend*>(e.backend());
@@ -3696,16 +3762,16 @@ static bool EmitPack(A64Emitter& e, const Instr* i) {
   switch (pack_mode) {
     case PACK_TYPE_D3DCOLOR:
       return EmitVec128UnaryViaHelper(
-          e, i, src1, reinterpret_cast<uint64_t>(&A64PackD3DCOLOR));
+          e, i, src1, reinterpret_cast<uint64_t>(&A64PackD3DCOLOR), 0);
     case PACK_TYPE_FLOAT16_2:
       return EmitVec128UnaryViaHelper(
-          e, i, src1, reinterpret_cast<uint64_t>(&A64PackFLOAT16_2));
+          e, i, src1, reinterpret_cast<uint64_t>(&A64PackFLOAT16_2), 0);
     case PACK_TYPE_FLOAT16_4:
       return EmitVec128UnaryViaHelper(
-          e, i, src1, reinterpret_cast<uint64_t>(&A64PackFLOAT16_4));
+          e, i, src1, reinterpret_cast<uint64_t>(&A64PackFLOAT16_4), 0);
     case PACK_TYPE_SHORT_2:
       return EmitVec128UnaryViaHelper(
-          e, i, src1, reinterpret_cast<uint64_t>(&A64PackSHORT_2));
+          e, i, src1, reinterpret_cast<uint64_t>(&A64PackSHORT_2), 0);
     case PACK_TYPE_8_IN_16:
     case PACK_TYPE_16_IN_32:
     case PACK_TYPE_SHORT_4:
@@ -3737,16 +3803,16 @@ static bool EmitUnpack(A64Emitter& e, const Instr* i) {
   switch (pack_mode) {
     case PACK_TYPE_D3DCOLOR:
       return EmitVec128UnaryViaHelper(
-          e, i, src, reinterpret_cast<uint64_t>(&A64UnpackD3DCOLOR));
+          e, i, src, reinterpret_cast<uint64_t>(&A64UnpackD3DCOLOR), 0);
     case PACK_TYPE_FLOAT16_2:
       return EmitVec128UnaryViaHelper(
-          e, i, src, reinterpret_cast<uint64_t>(&A64UnpackFLOAT16_2));
+          e, i, src, reinterpret_cast<uint64_t>(&A64UnpackFLOAT16_2), 0);
     case PACK_TYPE_FLOAT16_4:
       return EmitVec128UnaryViaHelper(
-          e, i, src, reinterpret_cast<uint64_t>(&A64UnpackFLOAT16_4));
+          e, i, src, reinterpret_cast<uint64_t>(&A64UnpackFLOAT16_4), 0);
     case PACK_TYPE_SHORT_2:
       return EmitVec128UnaryViaHelper(
-          e, i, src, reinterpret_cast<uint64_t>(&A64UnpackSHORT_2));
+          e, i, src, reinterpret_cast<uint64_t>(&A64UnpackSHORT_2), 0);
     case PACK_TYPE_8_IN_16:
     case PACK_TYPE_16_IN_32:
     case PACK_TYPE_SHORT_4:

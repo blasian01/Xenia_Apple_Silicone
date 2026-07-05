@@ -5,6 +5,9 @@
 #define XENIA_CPU_BACKEND_A64_A64_BACKEND_H_
 
 #include <memory>
+#include <mutex>
+#include <utility>
+#include <vector>
 
 #include "xenia/base/bit_map.h"
 #include "xenia/base/cvar.h"
@@ -102,6 +105,10 @@ class A64Backend : public Backend {
     return reinterpret_cast<A64BackendContext*>(
         reinterpret_cast<intptr_t>(ctx) - sizeof(A64BackendContext));
   }
+
+  // Writes the indirection-table slot for a resolved guest function if its
+  // table page is committed and the host code lives in the JIT region.
+  void TryPatchIndirection(uint32_t guest_address, uint64_t host_address);
 
  private:
   static bool ExceptionCallbackThunk(Exception* ex, void* data);

@@ -105,6 +105,8 @@ class CodeCacheBase : public CodeCache {
 
   bool has_indirection_table() { return indirection_table_base_ != nullptr; }
 
+  uint8_t* indirection_table_base() const { return indirection_table_base_; }
+
   void set_indirection_default(uint32_t default_value) {
     indirection_default_value_ = default_value;
   }
@@ -214,12 +216,13 @@ class CodeCacheBase : public CodeCache {
     self().OnCodePlaced(guest_address, function_info, code_execute_address,
                         func_info.code_size.total);
 
-    // Fix up indirection table.
+    // Fix up indirection table. The stored value's meaning is
+    // backend-specific (IndirectionSlotValue CRTP hook): x64 stores the
+    // truncated host address, a64 an offset into the JIT region.
     if (guest_address && indirection_table_base_) {
       uint32_t* indirection_slot = reinterpret_cast<uint32_t*>(
           indirection_table_base_ + (guest_address - kIndirectionTableBase));
-      *indirection_slot =
-          uint32_t(reinterpret_cast<uint64_t>(code_execute_address));
+      *indirection_slot = self().IndirectionSlotValue(code_execute_address);
     }
   }
 
