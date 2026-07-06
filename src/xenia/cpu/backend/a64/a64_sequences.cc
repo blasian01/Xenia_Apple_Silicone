@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstring>
 
+#include "xenia/base/byte_order.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/cpu/backend/a64/a64_backend.h"
@@ -482,8 +483,12 @@ extern "C" uint64_t A64LoadMmio(void* raw_context, uint64_t mmio_range_ptr,
   if (!mmio_range || !mmio_range->read) {
     return 0;
   }
-  return mmio_range->read(raw_context, mmio_range->callback_context,
-                          static_cast<uint32_t>(guest_address));
+  // The HIR wraps MMIO loads in a byte_swap (guest loads are big-endian),
+  // so hand back the callback's host-order value byte-swapped, exactly like
+  // the x64 LOAD_MMIO sequence does.
+  return xe::byte_swap(
+      mmio_range->read(raw_context, mmio_range->callback_context,
+                       static_cast<uint32_t>(guest_address)));
 }
 
 extern "C" uint64_t A64StoreMmio(void* raw_context, uint64_t mmio_range_ptr,
@@ -494,7 +499,9 @@ extern "C" uint64_t A64StoreMmio(void* raw_context, uint64_t mmio_range_ptr,
   }
 
   uint32_t guest_address = static_cast<uint32_t>(guest_address_and_value >> 32);
-  uint32_t value = static_cast<uint32_t>(guest_address_and_value);
+  // The incoming value passed through the HIR's byte_swap; undo it so the
+  // callback sees host order (mirrors the x64 STORE_MMIO bswap).
+  uint32_t value = xe::byte_swap(static_cast<uint32_t>(guest_address_and_value));
   mmio_range->write(raw_context, mmio_range->callback_context, guest_address,
                     value);
   return 0;

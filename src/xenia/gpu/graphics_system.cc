@@ -9,6 +9,8 @@
 
 #include "xenia/gpu/graphics_system.h"
 
+#include <atomic>
+
 #include "xenia/base/byte_stream.h"
 #include "xenia/base/clock.h"
 #include "xenia/base/logging.h"
@@ -355,6 +357,12 @@ void GraphicsSystem::SetInterruptCallback(uint32_t callback,
 }
 
 void GraphicsSystem::DispatchInterruptCallback(uint32_t source, uint32_t cpu) {
+  static std::atomic<uint64_t> dispatch_count{0};
+  const uint64_t count = ++dispatch_count;
+  if (count <= 5 || (count % 1000) == 0) {
+    XELOGGPU("DispatchInterruptCallback #{} source={} cpu={} callback={:08X}",
+             count, source, cpu, interrupt_callback_);
+  }
   kernel_state()->EmulateCPInterruptDPC(interrupt_callback_,
                                         interrupt_callback_data_, source, cpu);
 }

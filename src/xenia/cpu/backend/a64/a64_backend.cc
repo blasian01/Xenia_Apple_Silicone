@@ -41,6 +41,7 @@ bool ShouldDumpHotLoopWindow(uint32_t guest_target) {
     case 0x820CC1AC:
     case 0x820CC1B4:
     case 0x820CC1F4:
+    case 0x820D4C18:  // WALL-E graphics interrupt callback
       return true;
     default:
       return false;
@@ -176,7 +177,8 @@ extern "C" uint64_t A64ResolveFunction(void* raw_context,
   if (ShouldLogHotLoopState(guest_target)) {
     LogHotLoopState(guest_context, guest_target);
   }
-  if (guest_target >= 0x820C0000 && guest_target < 0x820D0000) {
+  if ((guest_target >= 0x820C0000 && guest_target < 0x820D0000) ||
+      guest_target == 0x820D4C18) {
     bool should_log = false;
     {
       std::lock_guard<std::mutex> lock(hot_target_log_mutex);
