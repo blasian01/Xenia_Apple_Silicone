@@ -2264,22 +2264,49 @@ static bool EmitTruncate(A64Emitter& e, const Instr* i) {
 
 // === Integer Arithmetic ===
 
+// Sub-word (INT8/INT16) results must stay zero-extended in the host register:
+// consumers such as EmitCompare read the low 32 bits with CMPw and rely on any
+// bits above the operand width being clear. The 32-bit w-form arithmetic ops
+// (ADDw/SUBw/MULw) leave those bits set on overflow, so re-extend afterward.
+// (EmitShl/EmitSha/EmitRotateLeft already do this for shifts.)
+static void ZeroExtendSubword(A64Emitter& e, GReg rd, TypeName type) {
+  if (type == INT8_TYPE) {
+    e.asm_().UXTB(rd, rd);
+  } else if (type == INT16_TYPE) {
+    e.asm_().UXTH(rd, rd);
+  }
+}
+
+// Masks a folded constant to the destination's integer width so it satisfies
+// the same zero-extension invariant.
+static uint64_t MaskToType(uint64_t value, TypeName type) {
+  switch (type) {
+    case INT8_TYPE:  return value & 0xFF;
+    case INT16_TYPE: return value & 0xFFFF;
+    case INT32_TYPE: return value & 0xFFFFFFFF;
+    default:         return value;
+  }
+}
+
 static bool EmitAdd(A64Emitter& e, const Instr* i) {
   if (!i->dest || !IsAlloc(i->dest)) return true;
   auto s1 = i->src1.value, s2 = i->src2.value;
   GReg rd = GR(i->dest);
 
   if (VALUE_IS_CONSTANT(s1) && VALUE_IS_CONSTANT(s2)) {
-    e.MovImm64(rd, s1->constant.i64 + s2->constant.i64);
+    e.MovImm64(rd, MaskToType(s1->constant.i64 + s2->constant.i64,
+                              i->dest->type));
   } else if (VALUE_IS_CONSTANT(s2) &&
              (s2->constant.u64 & 0xFFF) == s2->constant.u64) {
     GReg r1 = LoadGPR(e, s1, kScratch0);
     e.asm_().ADD(rd, r1, (uint32_t)s2->constant.u64);
+    ZeroExtendSubword(e, rd, i->dest->type);
   } else {
     GReg r1 = LoadGPR(e, s1, kScratch0);
     GReg r2 = LoadGPR(e, s2, kScratch1);
     if (i->dest->type <= INT32_TYPE) {
       e.asm_().ADDw(rd, r1, r2);
+      ZeroExtendSubword(e, rd, i->dest->type);
     } else {
       e.asm_().ADD(rd, r1, r2);
     }
@@ -2293,16 +2320,19 @@ static bool EmitSub(A64Emitter& e, const Instr* i) {
   GReg rd = GR(i->dest);
 
   if (VALUE_IS_CONSTANT(s1) && VALUE_IS_CONSTANT(s2)) {
-    e.MovImm64(rd, s1->constant.i64 - s2->constant.i64);
+    e.MovImm64(rd, MaskToType(s1->constant.i64 - s2->constant.i64,
+                              i->dest->type));
   } else if (VALUE_IS_CONSTANT(s2) &&
              (s2->constant.u64 & 0xFFF) == s2->constant.u64) {
     GReg r1 = LoadGPR(e, s1, kScratch0);
     e.asm_().SUB(rd, r1, (uint32_t)s2->constant.u64);
+    ZeroExtendSubword(e, rd, i->dest->type);
   } else {
     GReg r1 = LoadGPR(e, s1, kScratch0);
     GReg r2 = LoadGPR(e, s2, kScratch1);
     if (i->dest->type <= INT32_TYPE) {
       e.asm_().SUBw(rd, r1, r2);
+      ZeroExtendSubword(e, rd, i->dest->type);
     } else {
       e.asm_().SUB(rd, r1, r2);
     }
@@ -2317,6 +2347,7 @@ static bool EmitMul(A64Emitter& e, const Instr* i) {
   GReg r2 = LoadGPR(e, i->src2.value, kScratch1);
   if (i->dest->type <= INT32_TYPE) {
     e.asm_().MULw(rd, r1, r2);
+    ZeroExtendSubword(e, rd, i->dest->type);
   } else {
     e.asm_().MUL(rd, r1, r2);
   }
@@ -2631,8 +2662,23 @@ static bool EmitCompare(A64Emitter& e, const Instr* i, Cond cc) {
   GReg rd = GR(i->dest);
   GReg r1 = LoadGPR(e, i->src1.value, kScratch0);
   GReg r2 = LoadGPR(e, i->src2.value, kScratch1);
-  if (i->src1.value->type <= INT32_TYPE) {
-    e.asm_().CMPw(r1, r2);
+  const TypeName t = i->src1.value->type;
+  const bool is_signed = (cc == LT || cc == LE || cc == GT || cc == GE);
+  if (t <= INT32_TYPE) {
+    // Sub-word values are held zero-extended, so a 32-bit CMPw would treat a
+    // "negative" INT8/INT16 as a large positive number. Sign-extend the
+    // operands first for signed comparisons.
+    if (is_signed && t == INT8_TYPE) {
+      e.asm_().SXTB(kScratch0, r1);
+      e.asm_().SXTB(kScratch1, r2);
+      e.asm_().CMPw(kScratch0, kScratch1);
+    } else if (is_signed && t == INT16_TYPE) {
+      e.asm_().SXTH(kScratch0, r1);
+      e.asm_().SXTH(kScratch1, r2);
+      e.asm_().CMPw(kScratch0, kScratch1);
+    } else {
+      e.asm_().CMPw(r1, r2);
+    }
   } else {
     e.asm_().CMP(r1, r2);
   }
