@@ -226,6 +226,21 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
       return;
     }
   }
+
+  // No handler claimed the exception. Restore the original disposition and
+  // return: the faulting instruction re-executes and the default action
+  // produces a real crash (with a crash report) instead of an infinite
+  // fault-retry loop.
+  switch (signal_number) {
+    case SIGILL:
+      sigaction(SIGILL, &original_sigill_handler_, nullptr);
+      break;
+    case SIGSEGV:
+      sigaction(SIGSEGV, &original_sigsegv_handler_, nullptr);
+      break;
+    default:
+      break;
+  }
 }
 
 void ExceptionHandler::Install(Handler fn, void* data) {

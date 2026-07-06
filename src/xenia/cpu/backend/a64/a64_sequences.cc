@@ -221,6 +221,16 @@ static GReg ComputeHostAddress(A64Emitter& e, const Value* guest_address,
     e.asm_().ADDw(host_addr, host_addr, guest_offset);
   }
 
+  // Guest addresses >= 0xE0000000 sit 0x1000 higher in host memory (the
+  // console's 4 KB display-plane offset, emulated CPU-side — see
+  // Memory::TranslateVirtual). Branchless: 0x1000 iff the top 3 address
+  // bits are all set: add = (((guest >> 29) + 1) >> 3) << 12.
+  e.asm_().LSR_imm(scratch, host_addr, 29);
+  e.asm_().ADD_imm(scratch, scratch, 1);
+  e.asm_().LSR_imm(scratch, scratch, 3);
+  e.asm_().LSL_imm(scratch, scratch, 12);
+  e.asm_().ADD(host_addr, host_addr, scratch);
+
   e.asm_().ADD(host_addr, kMembaseReg, host_addr);
   return host_addr;
 }
@@ -399,6 +409,15 @@ static bool A64TryAcquireReservation(A64BackendContext* backend_context,
   return acquired;
 }
 
+// Guest addresses >= 0xE0000000 carry a 4 KB host offset (see
+// Memory::TranslateVirtual); every helper that forms a host pointer from a
+// guest address must apply it.
+static inline uint8_t* A64HostAddress(ppc::PPCContext* ppc_context,
+                                      uint32_t guest_address) {
+  const uint64_t host_offset = guest_address >= 0xE0000000u ? 0x1000u : 0u;
+  return ppc_context->virtual_membase + guest_address + host_offset;
+}
+
 template <typename T>
 static T A64ReservedLoadImpl(void* raw_context, uint64_t guest_address_u64) {
   auto* ppc_context = reinterpret_cast<ppc::PPCContext*>(raw_context);
@@ -408,7 +427,7 @@ static T A64ReservedLoadImpl(void* raw_context, uint64_t guest_address_u64) {
   A64TryAcquireReservation(backend_context, guest_address);
 
   auto* host_ptr =
-      reinterpret_cast<T*>(ppc_context->virtual_membase + guest_address);
+      reinterpret_cast<T*>(A64HostAddress(ppc_context, guest_address));
   T value = __atomic_load_n(host_ptr, __ATOMIC_ACQUIRE);
   backend_context->cached_reserve_value_ = static_cast<uint64_t>(value);
   return value;
@@ -442,7 +461,7 @@ static uint64_t A64ReservedStoreImpl(void* raw_context,
   if (cached_reserve_word == current_reserve_word &&
       cached_reserve_bit == current_reserve_bit) {
     auto* host_ptr =
-        reinterpret_cast<T*>(ppc_context->virtual_membase + guest_address);
+        reinterpret_cast<T*>(A64HostAddress(ppc_context, guest_address));
     T expected = static_cast<T>(backend_context->cached_reserve_value_);
     T desired = static_cast<T>(value_u64);
     success = __atomic_compare_exchange_n(host_ptr, &expected, desired, false,
@@ -527,7 +546,7 @@ static uint64_t A64AccessVectorSide(void* raw_context, uint64_t guest_address,
   uint8_t* scratch =
       reinterpret_cast<uint8_t*>(backend_context->helper_scratch);
   uint8_t* host_ptr =
-      ppc_context->virtual_membase + static_cast<uint32_t>(guest_address);
+      A64HostAddress(ppc_context, static_cast<uint32_t>(guest_address));
   uint32_t eb = static_cast<uint32_t>(guest_address) & 0xF;
   copy_fn(scratch, host_ptr, eb);
   return 0;
@@ -3903,8 +3922,13 @@ static bool EmitAtomicExchange(A64Emitter& e, const Instr* i) {
   }
 
   GReg dest = GR(i->dest);
-  // Compute host address: membase + guest_addr
-  e.asm_().ADD(kScratch2, kMembaseReg, addr_reg);
+  // Compute host address: membase + guest_addr (+0x1000 for >= 0xE0000000)
+  e.asm_().LSR_imm(X12, addr_reg, 29);
+  e.asm_().ADD_imm(X12, X12, 1);
+  e.asm_().LSR_imm(X12, X12, 3);
+  e.asm_().LSL_imm(X12, X12, 12);
+  e.asm_().ADD(kScratch2, addr_reg, X12);
+  e.asm_().ADD(kScratch2, kMembaseReg, kScratch2);
 
   // LDXR/STXR loop
   Label retry;
@@ -3944,8 +3968,13 @@ static bool EmitAtomicCompareExchange(A64Emitter& e, const Instr* i) {
   }
 
   GReg dest = GR(i->dest);
-  // Compute host address
-  e.asm_().ADD(X13, kMembaseReg, addr_reg);
+  // Compute host address (+0x1000 for guest >= 0xE0000000)
+  e.asm_().LSR_imm(X12, addr_reg, 29);
+  e.asm_().ADD_imm(X12, X12, 1);
+  e.asm_().LSR_imm(X12, X12, 3);
+  e.asm_().LSL_imm(X12, X12, 12);
+  e.asm_().ADD(X13, addr_reg, X12);
+  e.asm_().ADD(X13, kMembaseReg, X13);
 
   Label retry, done;
   e.asm_().Bind(&retry);

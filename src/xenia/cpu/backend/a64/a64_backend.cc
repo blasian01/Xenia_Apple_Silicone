@@ -4,6 +4,7 @@
 #include "xenia/cpu/backend/a64/a64_backend.h"
 
 #include <atomic>
+#include <unistd.h>
 #include <cfenv>
 #include <mutex>
 #include <unordered_set>
@@ -542,6 +543,28 @@ bool A64Backend::ExceptionCallbackThunk(Exception* ex, void* data) {
 }
 
 bool A64Backend::ExceptionCallback(Exception* ex) {
+  // If the fault happened outside JIT code (e.g. while the thread was inside
+  // the host allocator or logger), anything here that allocates or logs can
+  // re-enter a lock the interrupted frame already holds and self-deadlock.
+  // Emit a minimal async-signal-safe report and pass the exception on.
+  const uint64_t jit_base =
+      code_cache_ ? code_cache_->execute_base_address() : 0;
+  const uint64_t jit_size = code_cache_ ? code_cache_->total_size() : 0;
+  if (!jit_base || ex->pc() < jit_base || ex->pc() >= jit_base + jit_size) {
+    char buf[192];
+    int len = snprintf(
+        buf, sizeof(buf),
+        "A64 EXC outside JIT: code=%d pc=%llx fault_addr=%llx write=%d\n",
+        int(ex->code()), (unsigned long long)ex->pc(),
+        (unsigned long long)ex->fault_address(),
+        ex->access_violation_operation() ==
+            Exception::AccessViolationOperation::kWrite);
+    if (len > 0) {
+      (void)!write(STDERR_FILENO, buf, size_t(len));
+    }
+    return false;
+  }
+
   uint32_t inst = 0;
   if (ex->pc()) {
     // Only read inst if it's safe - but we could fault here. Ignore for now.

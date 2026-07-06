@@ -130,7 +130,12 @@ void A64CodeCache::OnCodePlaced(uint32_t guest_address,
                                 GuestFunction* function_info,
                                 void* code_execute_address,
                                 size_t code_size) {
-  // No VTune on ARM64; no-op.
+  // Log the guest->host mapping so sampled JIT PCs can be attributed to
+  // guest functions during debugging.
+  if (guest_address) {
+    XELOGI("ARM64: placed {:08X} -> {:p} len={}", guest_address,
+           code_execute_address, code_size);
+  }
 }
 
 }  // namespace a64
