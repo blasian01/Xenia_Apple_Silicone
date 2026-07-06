@@ -3922,12 +3922,16 @@ static bool EmitAtomicExchange(A64Emitter& e, const Instr* i) {
   }
 
   GReg dest = GR(i->dest);
+  // Truncate the guest address to 32 bits — the source register is a 64-bit
+  // PPC GPR whose upper half may be garbage, and an untruncated value would
+  // land the exclusive access far outside the guest memory window.
+  e.asm_().MOVw(kScratch2, addr_reg);
   // Compute host address: membase + guest_addr (+0x1000 for >= 0xE0000000)
-  e.asm_().LSR_imm(X12, addr_reg, 29);
+  e.asm_().LSR_imm(X12, kScratch2, 29);
   e.asm_().ADD_imm(X12, X12, 1);
   e.asm_().LSR_imm(X12, X12, 3);
   e.asm_().LSL_imm(X12, X12, 12);
-  e.asm_().ADD(kScratch2, addr_reg, X12);
+  e.asm_().ADD(kScratch2, kScratch2, X12);
   e.asm_().ADD(kScratch2, kMembaseReg, kScratch2);
 
   // LDXR/STXR loop
@@ -3968,12 +3972,15 @@ static bool EmitAtomicCompareExchange(A64Emitter& e, const Instr* i) {
   }
 
   GReg dest = GR(i->dest);
+  // Truncate the guest address to 32 bits (the PPC GPR's upper half may be
+  // garbage) before forming the host pointer.
+  e.asm_().MOVw(X13, addr_reg);
   // Compute host address (+0x1000 for guest >= 0xE0000000)
-  e.asm_().LSR_imm(X12, addr_reg, 29);
+  e.asm_().LSR_imm(X12, X13, 29);
   e.asm_().ADD_imm(X12, X12, 1);
   e.asm_().LSR_imm(X12, X12, 3);
   e.asm_().LSL_imm(X12, X12, 12);
-  e.asm_().ADD(X13, addr_reg, X12);
+  e.asm_().ADD(X13, X13, X12);
   e.asm_().ADD(X13, kMembaseReg, X13);
 
   Label retry, done;
