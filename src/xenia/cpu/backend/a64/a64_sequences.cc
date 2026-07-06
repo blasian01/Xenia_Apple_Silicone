@@ -486,9 +486,15 @@ extern "C" uint64_t A64LoadMmio(void* raw_context, uint64_t mmio_range_ptr,
   // The HIR wraps MMIO loads in a byte_swap (guest loads are big-endian),
   // so hand back the callback's host-order value byte-swapped, exactly like
   // the x64 LOAD_MMIO sequence does.
-  return xe::byte_swap(
-      mmio_range->read(raw_context, mmio_range->callback_context,
-                       static_cast<uint32_t>(guest_address)));
+  uint32_t value = mmio_range->read(raw_context, mmio_range->callback_context,
+                                    static_cast<uint32_t>(guest_address));
+  static std::atomic<uint64_t> load_count{0};
+  const uint64_t count = ++load_count;
+  if (count <= 20 || (count % 10000) == 0) {
+    XELOGI("ARM64: MMIO load #{} addr={:08X} -> {:08X}", count,
+           static_cast<uint32_t>(guest_address), value);
+  }
+  return xe::byte_swap(value);
 }
 
 extern "C" uint64_t A64StoreMmio(void* raw_context, uint64_t mmio_range_ptr,
@@ -502,6 +508,12 @@ extern "C" uint64_t A64StoreMmio(void* raw_context, uint64_t mmio_range_ptr,
   // The incoming value passed through the HIR's byte_swap; undo it so the
   // callback sees host order (mirrors the x64 STORE_MMIO bswap).
   uint32_t value = xe::byte_swap(static_cast<uint32_t>(guest_address_and_value));
+  static std::atomic<uint64_t> store_count{0};
+  const uint64_t count = ++store_count;
+  if (count <= 20 || (count % 10000) == 0) {
+    XELOGI("ARM64: MMIO store #{} addr={:08X} value={:08X}", count,
+           guest_address, value);
+  }
   mmio_range->write(raw_context, mmio_range->callback_context, guest_address,
                     value);
   return 0;

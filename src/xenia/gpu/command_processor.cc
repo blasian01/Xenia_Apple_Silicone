@@ -9,6 +9,8 @@
 
 #include "xenia/gpu/command_processor.h"
 
+#include <atomic>
+
 #include "third_party/fmt/include/fmt/format.h"
 #include "xenia/base/byte_stream.h"
 #include "xenia/base/cvar.h"
@@ -321,6 +323,14 @@ void CommandProcessor::WorkerThreadMain() {
     assert_true(read_ptr_index_ != write_ptr_index);
 
     // Execute. Note that we handle wraparound transparently.
+    {
+      static std::atomic<uint64_t> exec_count{0};
+      const uint64_t count = ++exec_count;
+      if (count <= 20 || (count % 1000) == 0) {
+        XELOGI("GPU: CP execute #{} read={:X} write={:X}", count,
+               read_ptr_index_, write_ptr_index);
+      }
+    }
     read_ptr_index_ = ExecutePrimaryBuffer(read_ptr_index_, write_ptr_index);
 
     // TODO(benvanik): use reader->Read_update_freq_ and only issue after moving

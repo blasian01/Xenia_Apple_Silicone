@@ -393,6 +393,14 @@ bool COMMAND_PROCESSOR::ExecutePacketType3(uint32_t packet) XE_RESTRICT {
   // Type-3 packet.
   uint32_t opcode = (packet >> 8) & 0x7F;
   uint32_t count = ((packet >> 16) & 0x3FFF) + 1;
+  {
+    static std::atomic<uint64_t> t3_count{0};
+    const uint64_t n = ++t3_count;
+    if (n <= 64 || (n % 100000) == 0) {
+      XELOGI("GPU: PM4 type3 #{} opcode={:02X} count={} packet={:08X}", n,
+             opcode, count, packet);
+    }
+  }
   auto data_start_offset = reader_.read_offset();
 
   if (COMMAND_PROCESSOR::GetCurrentRingReadCount() >=

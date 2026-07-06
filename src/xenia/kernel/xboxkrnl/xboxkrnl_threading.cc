@@ -7,6 +7,8 @@
  ******************************************************************************
  */
 
+#include <atomic>
+
 #include "xenia/kernel/xboxkrnl/xboxkrnl_threading.h"
 #include "xenia/base/atomic.h"
 #include "xenia/base/clock.h"
@@ -998,6 +1000,22 @@ dword_result_t NtWaitForSingleObjectEx_entry(dword_t object_handle,
                                              dword_t alertable,
                                              lpqword_t timeout_ptr) {
   uint64_t timeout = timeout_ptr ? static_cast<uint64_t>(*timeout_ptr) : 0u;
+  {
+    static std::atomic<uint64_t> wait_log_count{0};
+    const uint64_t n = ++wait_log_count;
+    if (n <= 100) {
+      auto* thread = XThread::GetCurrentThread();
+      auto* context = thread ? thread->thread_state()->context() : nullptr;
+      fprintf(stderr,
+              "WAITLOG NtWaitForSingleObjectEx #%llu thread=%08X handle=%08X "
+              "timeout=%lld lr=%08X\n",
+              (unsigned long long)n, thread ? thread->handle() : 0,
+              uint32_t(object_handle),
+              timeout_ptr ? (long long)timeout : -1ll,
+              context ? uint32_t(context->lr) : 0);
+      fflush(stderr);
+    }
+  }
   return NtWaitForSingleObjectEx(object_handle, wait_mode, alertable,
                                  timeout_ptr ? &timeout : nullptr);
 }
