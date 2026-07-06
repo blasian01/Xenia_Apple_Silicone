@@ -2385,8 +2385,17 @@ static bool EmitAbs(A64Emitter& e, const Instr* i) {
 
 // === Logical ===
 
+// Bitwise logical ops are polymorphic in the HIR: they operate on integer
+// GPRs and on 128-bit vectors (VMX vand/vor/vxor/vnor/vandc). Dispatch the
+// VEC128 case to the NEON *_16B forms.
 static bool EmitAnd(A64Emitter& e, const Instr* i) {
   if (!i->dest || !IsAlloc(i->dest)) return true;
+  if (i->dest->type == VEC128_TYPE) {
+    VReg v1 = LoadVec128(e, i->src1.value, kVScratch0);
+    VReg v2 = LoadVec128(e, i->src2.value, kVScratch1);
+    e.asm_().AND_16B(VR(i->dest), v1, v2);
+    return true;
+  }
   GReg rd = GR(i->dest);
   GReg r1 = LoadGPR(e, i->src1.value, kScratch0);
   GReg r2 = LoadGPR(e, i->src2.value, kScratch1);
@@ -2397,6 +2406,12 @@ static bool EmitAnd(A64Emitter& e, const Instr* i) {
 
 static bool EmitOr(A64Emitter& e, const Instr* i) {
   if (!i->dest || !IsAlloc(i->dest)) return true;
+  if (i->dest->type == VEC128_TYPE) {
+    VReg v1 = LoadVec128(e, i->src1.value, kVScratch0);
+    VReg v2 = LoadVec128(e, i->src2.value, kVScratch1);
+    e.asm_().ORR_16B(VR(i->dest), v1, v2);
+    return true;
+  }
   GReg rd = GR(i->dest);
   GReg r1 = LoadGPR(e, i->src1.value, kScratch0);
   GReg r2 = LoadGPR(e, i->src2.value, kScratch1);
@@ -2407,6 +2422,12 @@ static bool EmitOr(A64Emitter& e, const Instr* i) {
 
 static bool EmitXor(A64Emitter& e, const Instr* i) {
   if (!i->dest || !IsAlloc(i->dest)) return true;
+  if (i->dest->type == VEC128_TYPE) {
+    VReg v1 = LoadVec128(e, i->src1.value, kVScratch0);
+    VReg v2 = LoadVec128(e, i->src2.value, kVScratch1);
+    e.asm_().EOR_16B(VR(i->dest), v1, v2);
+    return true;
+  }
   GReg rd = GR(i->dest);
   GReg r1 = LoadGPR(e, i->src1.value, kScratch0);
   GReg r2 = LoadGPR(e, i->src2.value, kScratch1);
@@ -2417,6 +2438,11 @@ static bool EmitXor(A64Emitter& e, const Instr* i) {
 
 static bool EmitNot(A64Emitter& e, const Instr* i) {
   if (!i->dest || !IsAlloc(i->dest)) return true;
+  if (i->dest->type == VEC128_TYPE) {
+    VReg vs = LoadVec128(e, i->src1.value, kVScratch0);
+    e.asm_().NOT_16B(VR(i->dest), vs);
+    return true;
+  }
   GReg rd = GR(i->dest);
   GReg rs = LoadGPR(e, i->src1.value, kScratch0);
   e.asm_().MVN(rd, rs);
@@ -2425,6 +2451,14 @@ static bool EmitNot(A64Emitter& e, const Instr* i) {
 
 static bool EmitAndNot(A64Emitter& e, const Instr* i) {
   if (!i->dest || !IsAlloc(i->dest)) return true;
+  if (i->dest->type == VEC128_TYPE) {
+    // BIC Vd = Vsrc1 AND NOT Vsrc2 — but NEON BIC computes Vn AND NOT Vm,
+    // so operand order matches (dest = src1 AND NOT src2).
+    VReg v1 = LoadVec128(e, i->src1.value, kVScratch0);
+    VReg v2 = LoadVec128(e, i->src2.value, kVScratch1);
+    e.asm_().BIC_16B(VR(i->dest), v1, v2);
+    return true;
+  }
   GReg rd = GR(i->dest);
   GReg r1 = LoadGPR(e, i->src1.value, kScratch0);
   GReg r2 = LoadGPR(e, i->src2.value, kScratch1);
