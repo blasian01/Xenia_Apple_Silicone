@@ -9,6 +9,8 @@
 
 #include "xenia/gpu/graphics_system.h"
 
+#include <chrono>
+
 #include <atomic>
 
 #include "xenia/base/byte_stream.h"
@@ -166,6 +168,9 @@ X_STATUS GraphicsSystem::Setup(cpu::Processor* processor,
                                                     normalized_framerate_limit))
                     : 1.0;
             uint64_t last_frame_time = Clock::QueryGuestTickCount();
+#if XE_PLATFORM_LINUX || XE_PLATFORM_MAC
+            auto next_vblank_time = std::chrono::steady_clock::now();
+#endif
     // Sleep for 90% of the vblank duration on Windows, spin for 10%
     // Linux/macOS use full sleep duration due to scheduler quantum issues
 #if XE_PLATFORM_WIN32
@@ -222,7 +227,22 @@ X_STATUS GraphicsSystem::Setup(cpu::Processor* processor,
                 if (!cvars::vsync && normalized_framerate_limit > 0) {
                   sleep_duration_ns = 1000000000 / normalized_framerate_limit;
                 }
-                threading::NanoSleep(sleep_duration_ns);
+                // Sleep until an absolute deadline so that the time spent in
+                // MarkVblank and the oversleeping don't accumulate, which
+                // would make the vblank rate (and thus the frame rate of
+                // titles synchronized to it) lower than requested.
+                const auto now = std::chrono::steady_clock::now();
+                next_vblank_time += std::chrono::nanoseconds(sleep_duration_ns);
+                if (next_vblank_time > now) {
+                  threading::NanoSleep(
+                      std::chrono::duration_cast<std::chrono::nanoseconds>(
+                          next_vblank_time - now)
+                          .count());
+                } else if (now - next_vblank_time >
+                           std::chrono::nanoseconds(sleep_duration_ns * 4)) {
+                  // Too far behind (the host was suspended, for instance).
+                  next_vblank_time = now;
+                }
               } else {
                 xe::threading::Sleep(std::chrono::milliseconds(1));
               }

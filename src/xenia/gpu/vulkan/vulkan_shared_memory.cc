@@ -21,6 +21,15 @@
 
 DECLARE_bool(gpu_allow_invalid_upload_range);
 
+DEFINE_bool(
+    vulkan_hoist_shared_memory_uploads, true,
+    "When guest memory used by a draw has changed, upload it before the "
+    "current host render pass instead of interrupting the render pass. "
+    "Interrupting is very slow on tile-based GPUs (Apple Silicon, mobile). "
+    "Draws issued earlier in the same render pass will see the new contents "
+    "of the uploaded pages - disable if geometry flickers or is corrupted.",
+    "Vulkan");
+
 DEFINE_bool(vulkan_sparse_shared_memory, true,
             "Enable sparse binding for shared memory emulation. Disabling it "
             "increases video memory usage - a 512 MB buffer is created - but "
@@ -391,13 +400,41 @@ bool VulkanSharedMemory::UploadRanges(
 
   // upload_page_ranges are sorted, use them to determine the range for the
   // ordering barrier.
-  Use(Usage::kTransferDestination,
-      std::make_pair(range_front.first << page_size_log2(),
-                     (range_back.first + range_back.second - range_front.first)
-                         << page_size_log2()));
-  command_processor_.SubmitBarriers(true);
+  // If the buffer is only being read in the current render pass, the upload
+  // can be done right before that render pass rather than ending it.
+  DeferredCommandBuffer* hoist_command_buffer = nullptr;
+  if (cvars::vulkan_hoist_shared_memory_uploads &&
+      last_usage_ == Usage::kRead && !last_written_range_.second) {
+    hoist_command_buffer = command_processor_.render_pass_hoist_buffer();
+  }
+  VkBufferMemoryBarrier hoist_barrier;
+  VkPipelineStageFlags hoist_read_stage_mask = 0;
+  if (hoist_command_buffer) {
+    VkAccessFlags hoist_read_access_mask;
+    GetUsageMasks(Usage::kRead, hoist_read_stage_mask, hoist_read_access_mask);
+    hoist_barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+    hoist_barrier.pNext = nullptr;
+    hoist_barrier.srcAccessMask = hoist_read_access_mask;
+    hoist_barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    hoist_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    hoist_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    hoist_barrier.buffer = buffer_;
+    hoist_barrier.offset = 0;
+    hoist_barrier.size = VK_WHOLE_SIZE;
+    hoist_command_buffer->CmdVkPipelineBarrier(
+        hoist_read_stage_mask, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr,
+        1, &hoist_barrier, 0, nullptr);
+  } else {
+    Use(Usage::kTransferDestination,
+        std::make_pair(
+            range_front.first << page_size_log2(),
+            (range_back.first + range_back.second - range_front.first)
+                << page_size_log2()));
+    command_processor_.SubmitBarriers(true);
+  }
   DeferredCommandBuffer& command_buffer =
-      command_processor_.deferred_command_buffer();
+      hoist_command_buffer ? *hoist_command_buffer
+                           : command_processor_.deferred_command_buffer();
   uint64_t submission_current = command_processor_.GetCurrentSubmission();
   bool successful = true;
   upload_regions_.clear();
@@ -488,6 +525,13 @@ bool VulkanSharedMemory::UploadRanges(
                                    uint32_t(upload_regions_.size()),
                                    upload_regions_.data());
     upload_regions_.clear();
+  }
+  if (hoist_command_buffer) {
+    // Back to the usage the render pass expects.
+    std::swap(hoist_barrier.srcAccessMask, hoist_barrier.dstAccessMask);
+    hoist_command_buffer->CmdVkPipelineBarrier(
+        VK_PIPELINE_STAGE_TRANSFER_BIT, hoist_read_stage_mask, 0, 0, nullptr,
+        1, &hoist_barrier, 0, nullptr);
   }
   return successful;
 }

@@ -276,7 +276,16 @@ class TextureCache {
     bool mips_outdated_lockless() const { return mips_outdated_; }
     void MakeUpToDateAndWatch(const global_unique_lock_type& global_lock);
 
-    void WatchCallback(const global_unique_lock_type& global_lock, bool is_mip);
+    // Reverts MakeUpToDateAndWatch if loading the data has failed.
+    void MakeOutdatedAndUnwatch(const global_unique_lock_type& global_lock,
+                                bool base, bool mips);
+    // Hashes the guest data of the base level or of the mips, and returns
+    // whether it's the same as the last time this was called (and the range
+    // wasn't written to by the GPU since then).
+    bool UpdateGuestDataHash(bool is_mip);
+
+    void WatchCallback(const global_unique_lock_type& global_lock, bool is_mip,
+                       bool invalidated_by_gpu);
 
     // For LRU caching - updates the last usage frame and moves the texture to
     // the end of the usage queue. Must be called any time the texture is
@@ -329,6 +338,14 @@ class TextureCache {
     // Watch handles for the memory ranges.
     SharedMemory::WatchHandle base_watch_handle_ = nullptr;
     SharedMemory::WatchHandle mips_watch_handle_ = nullptr;
+
+    // Hashes of the guest data the host texture was last loaded from. The
+    // validity flags are reset from watch callbacks (any thread, within the
+    // global critical region), the rest is used only by the GPU thread.
+    uint64_t base_hash_ = 0;
+    uint64_t mips_hash_ = 0;
+    std::atomic<bool> base_hash_valid_{false};
+    std::atomic<bool> mips_hash_valid_{false};
   };
 
   // Rules of data access in load shaders:
@@ -578,6 +595,9 @@ class TextureCache {
     return load_shader_info_[load_shader_index];
   }
   bool LoadTextureData(Texture& texture);
+  // Loads the data of a texture that is already being watched.
+  bool LoadWatchedTextureData(Texture& texture, bool base_outdated,
+                              bool mips_outdated);
   void LoadTexturesData(Texture** textures, uint32_t n_textures);
   // Writes the texture data (for base, mips or both - but not neither) from the
   // shared memory or the scaled resolve memory. The shared memory management is

@@ -50,6 +50,10 @@ class VulkanSharedMemory : public SharedMemory {
   };
   // Inserts a pipeline barrier for the target usage, also ensuring consecutive
   // read-write accesses are ordered with each other.
+  // Whether the buffer can currently be read without any barriers.
+  bool IsUsedForReading() const {
+    return last_usage_ == Usage::kRead && !last_written_range_.second;
+  }
   void Use(Usage usage, std::pair<uint32_t, uint32_t> written_range = {});
 
   VkBuffer buffer() const { return buffer_; }

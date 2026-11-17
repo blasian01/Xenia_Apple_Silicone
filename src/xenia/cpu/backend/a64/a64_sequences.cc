@@ -480,49 +480,6 @@ static A64BackendContext* A64GetBackendContext(void* raw_context) {
       reinterpret_cast<uint8_t*>(raw_context) - sizeof(A64BackendContext));
 }
 
-static void A64ReleaseCachedReservation(A64BackendContext* backend_context) {
-  if (!(backend_context->flags & kA64BackendHasReserveMask) ||
-      !backend_context->cached_reserve_offset) {
-    backend_context->flags &= ~kA64BackendHasReserveMask;
-    return;
-  }
-
-  auto reserve_word =
-      reinterpret_cast<uint64_t*>(backend_context->cached_reserve_offset);
-  uint64_t reserve_mask =
-      uint64_t(1) << (backend_context->cached_reserve_bit & 63);
-  __atomic_fetch_and(reserve_word, ~reserve_mask, __ATOMIC_ACQ_REL);
-  backend_context->flags &= ~kA64BackendHasReserveMask;
-}
-
-static bool A64TryAcquireReservation(A64BackendContext* backend_context,
-                                     uint32_t guest_address) {
-  A64ReleaseCachedReservation(backend_context);
-  if (!backend_context->reserve_helper_) {
-    return false;
-  }
-
-  uint32_t reserve_index = guest_address >> RESERVE_BLOCK_SHIFT;
-  auto reserve_word =
-      &backend_context->reserve_helper_->blocks[reserve_index >> 6];
-  uint32_t reserve_bit = reserve_index & 63;
-  uint64_t reserve_mask = uint64_t(1) << reserve_bit;
-  uint64_t previous =
-      __atomic_fetch_or(reserve_word, reserve_mask, __ATOMIC_ACQ_REL);
-
-  backend_context->cached_reserve_offset =
-      reinterpret_cast<uint64_t>(reserve_word);
-  backend_context->cached_reserve_bit = reserve_bit;
-
-  bool acquired = (previous & reserve_mask) == 0;
-  if (acquired) {
-    backend_context->flags |= kA64BackendHasReserveMask;
-  } else {
-    backend_context->flags &= ~kA64BackendHasReserveMask;
-  }
-  return acquired;
-}
-
 // Guest addresses >= 0xE0000000 carry a 4 KB host offset (see
 // Memory::TranslateVirtual); every helper that forms a host pointer from a
 // guest address must apply it.
@@ -532,18 +489,27 @@ static inline uint8_t* A64HostAddress(ppc::PPCContext* ppc_context,
   return ppc_context->virtual_membase + guest_address + host_offset;
 }
 
+// lwarx/ldarx + stwcx./stdcx. are emulated per thread: the load remembers the
+// address and the value it read, and the conditional store succeeds only if
+// it targets the same address and the memory still holds that value (a
+// compare-and-swap). Unlike a reservation table shared between all threads,
+// this never makes one guest thread fail because another one holds a
+// reservation nearby, and doesn't bounce a shared cache line between cores -
+// titles use these instructions for every interlocked operation and spin
+// lock.
 template <typename T>
 static T A64ReservedLoadImpl(void* raw_context, uint64_t guest_address_u64) {
   auto* ppc_context = reinterpret_cast<ppc::PPCContext*>(raw_context);
   auto* backend_context = A64GetBackendContext(raw_context);
   uint32_t guest_address = static_cast<uint32_t>(guest_address_u64);
 
-  A64TryAcquireReservation(backend_context, guest_address);
-
   auto* host_ptr =
       reinterpret_cast<T*>(A64HostAddress(ppc_context, guest_address));
   T value = __atomic_load_n(host_ptr, __ATOMIC_ACQUIRE);
+  backend_context->cached_reserve_offset = guest_address;
+  backend_context->cached_reserve_bit = sizeof(T);
   backend_context->cached_reserve_value_ = static_cast<uint64_t>(value);
+  backend_context->flags |= kA64BackendHasReserveMask;
   return value;
 }
 
@@ -555,25 +521,10 @@ static uint64_t A64ReservedStoreImpl(void* raw_context,
   auto* backend_context = A64GetBackendContext(raw_context);
   uint32_t guest_address = static_cast<uint32_t>(guest_address_u64);
 
-  if (!(backend_context->flags & kA64BackendHasReserveMask) ||
-      !backend_context->reserve_helper_ ||
-      !backend_context->cached_reserve_offset) {
-    return 0;
-  }
-
-  auto* cached_reserve_word =
-      reinterpret_cast<uint64_t*>(backend_context->cached_reserve_offset);
-  uint32_t cached_reserve_bit = backend_context->cached_reserve_bit & 63;
-  uint64_t cached_reserve_mask = uint64_t(1) << cached_reserve_bit;
-
-  uint32_t current_reserve_index = guest_address >> RESERVE_BLOCK_SHIFT;
-  auto* current_reserve_word =
-      &backend_context->reserve_helper_->blocks[current_reserve_index >> 6];
-  uint32_t current_reserve_bit = current_reserve_index & 63;
-
   bool success = false;
-  if (cached_reserve_word == current_reserve_word &&
-      cached_reserve_bit == current_reserve_bit) {
+  if ((backend_context->flags & kA64BackendHasReserveMask) &&
+      backend_context->cached_reserve_offset == guest_address &&
+      backend_context->cached_reserve_bit == sizeof(T)) {
     auto* host_ptr =
         reinterpret_cast<T*>(A64HostAddress(ppc_context, guest_address));
     T expected = static_cast<T>(backend_context->cached_reserve_value_);
@@ -581,9 +532,6 @@ static uint64_t A64ReservedStoreImpl(void* raw_context,
     success = __atomic_compare_exchange_n(host_ptr, &expected, desired, false,
                                           __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
   }
-
-  __atomic_fetch_and(cached_reserve_word, ~cached_reserve_mask,
-                     __ATOMIC_ACQ_REL);
   backend_context->flags &= ~kA64BackendHasReserveMask;
   return success ? 1 : 0;
 }

@@ -41,6 +41,7 @@ namespace xe {
 namespace gpu {
 namespace vulkan {
 
+
 // Generated with `xb buildshaders`.
 namespace shaders {
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/apply_gamma_pwl_fxaa_luma_ps.h"
@@ -1808,13 +1809,19 @@ bool VulkanCommandProcessor::PushImageMemoryBarrier(
 bool VulkanCommandProcessor::SubmitBarriers(bool force_end_render_pass) {
   assert_true(submission_open_);
   SplitPendingBarrier();
+  // While hoisting, the barriers go before the render pass, which stays open.
+  DeferredCommandBuffer& barrier_command_buffer =
+      render_pass_hoist_active_ ? *current_render_pass_hoist_buffer_
+                                : deferred_command_buffer_;
   if (pending_barriers_.empty()) {
-    if (force_end_render_pass) {
+    if (force_end_render_pass && !render_pass_hoist_active_) {
       EndRenderPass();
     }
     return false;
   }
-  EndRenderPass();
+  if (!render_pass_hoist_active_) {
+    EndRenderPass();
+  }
   for (auto it = pending_barriers_.cbegin(); it != pending_barriers_.cend();
        ++it) {
     auto it_next = std::next(it);
@@ -1822,7 +1829,7 @@ bool VulkanCommandProcessor::SubmitBarriers(bool force_end_render_pass) {
     // .data() + offset, not &[offset], for buffer and image barriers, because
     // if there are no buffer or image memory barriers in the last pipeline
     // barriers, the offsets may be equal to the sizes of the vectors.
-    deferred_command_buffer_.CmdVkPipelineBarrier(
+    barrier_command_buffer.CmdVkPipelineBarrier(
         it->src_stage_mask ? it->src_stage_mask
                            : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
         it->dst_stage_mask ? it->dst_stage_mask
@@ -1860,6 +1867,15 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
   }
   current_render_pass_ = render_pass;
   current_framebuffer_ = framebuffer;
+  if (render_pass_hoist_buffers_used_ >= render_pass_hoist_buffers_.size()) {
+    render_pass_hoist_buffers_.push_back(
+        std::make_unique<DeferredCommandBuffer>(*this, 4096));
+  }
+  current_render_pass_hoist_buffer_ =
+      render_pass_hoist_buffers_[render_pass_hoist_buffers_used_++].get();
+  current_render_pass_hoist_buffer_->Reset();
+  deferred_command_buffer_.CmdExecuteNested(current_render_pass_hoist_buffer_);
+  ++render_pass_serial_;
   VkRenderPassBeginInfo render_pass_begin_info;
   render_pass_begin_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
   render_pass_begin_info.pNext = nullptr;
@@ -1876,12 +1892,33 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
                                                 VK_SUBPASS_CONTENTS_INLINE);
 }
 
+bool VulkanCommandProcessor::BeginRenderPassHoist() {
+  if (render_pass_hoist_active_ || !render_pass_hoist_buffer()) {
+    return false;
+  }
+  SplitPendingBarrier();
+  if (!pending_barriers_.empty()) {
+    return false;
+  }
+  render_pass_hoist_active_ = true;
+  return true;
+}
+
+void VulkanCommandProcessor::EndRenderPassHoist() {
+  assert_true(render_pass_hoist_active_);
+  SubmitBarriers(false);
+  render_pass_hoist_active_ = false;
+  current_external_compute_pipeline_ = VK_NULL_HANDLE;
+}
+
 void VulkanCommandProcessor::EndRenderPass() {
   assert_true(submission_open_);
+  assert_false(render_pass_hoist_active_);
   if (current_render_pass_ == VK_NULL_HANDLE) {
     return;
   }
   deferred_command_buffer_.CmdVkEndRenderPass();
+  current_render_pass_hoist_buffer_ = nullptr;
   current_render_pass_ = VK_NULL_HANDLE;
   current_framebuffer_ = nullptr;
 }
@@ -2176,6 +2213,14 @@ void VulkanCommandProcessor::BindExternalGraphicsPipeline(
 }
 
 void VulkanCommandProcessor::BindExternalComputePipeline(VkPipeline pipeline) {
+  if (render_pass_hoist_active_) {
+    // Executed out of order with the rest of the command buffer, so the
+    // pipeline bound there is not known here, and vice versa.
+    current_render_pass_hoist_buffer_->CmdVkBindPipeline(
+        VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+    current_external_compute_pipeline_ = VK_NULL_HANDLE;
+    return;
+  }
   if (current_external_compute_pipeline_ == pipeline) {
     return;
   }
@@ -3292,6 +3337,9 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
     // the end of the submission (when async pipeline object creation requests
     // are fulfilled).
     deferred_command_buffer_.Reset();
+    render_pass_hoist_buffers_used_ = 0;
+    current_render_pass_hoist_buffer_ = nullptr;
+    render_pass_hoist_active_ = false;
 
     // Reset cached state of the command buffer.
     dynamic_viewport_update_needed_ = true;

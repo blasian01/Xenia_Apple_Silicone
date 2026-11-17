@@ -262,6 +262,16 @@ class VulkanTextureCache final : public TextureCache {
 
     VkImage image() const { return image_; }
 
+    // The render pass (VulkanCommandProcessor::render_pass_serial) that was
+    // the most recent one when a draw last requested this texture - the draw
+    // itself is in that render pass or in the next one.
+    uint64_t last_draw_render_pass_serial() const {
+      return last_draw_render_pass_serial_;
+    }
+    void SetLastDrawRenderPassSerial(uint64_t serial) {
+      last_draw_render_pass_serial_ = serial;
+    }
+
     // Doesn't transition (the caller must insert the barrier).
     Usage SetUsage(Usage new_usage) {
       Usage old_usage = usage_;
@@ -334,6 +344,7 @@ class VulkanTextureCache final : public TextureCache {
     VmaAllocation allocation_;
 
     Usage usage_ = Usage::kUndefined;
+    uint64_t last_draw_render_pass_serial_ = 0;
 
     std::unordered_map<ViewKey, VkImageView, ViewKey::Hasher> views_;
 

@@ -293,6 +293,15 @@ class DeferredCommandBuffer {
 
   void CmdVkEndRenderPass() { WriteCommand(Command::kVkEndRenderPass, 0); }
 
+  // Executes all the commands of another deferred command buffer (as they are
+  // by the time this one is executed) at this point. The nested buffer must
+  // outlive the execution of this one.
+  void CmdExecuteNested(DeferredCommandBuffer* nested) {
+    auto& args = *reinterpret_cast<ArgsExecuteNested*>(
+        WriteCommand(Command::kExecuteNested, sizeof(ArgsExecuteNested)));
+    args.nested = nested;
+  }
+
   // pNext of all barriers must be null.
   void CmdVkPipelineBarrier(VkPipelineStageFlags src_stage_mask,
                             VkPipelineStageFlags dst_stage_mask,
@@ -411,6 +420,7 @@ class DeferredCommandBuffer {
     kVkSetStencilReference,
     kVkSetStencilWriteMask,
     kVkSetViewport,
+    kExecuteNested,
   };
 
   struct CommandHeader {
@@ -502,6 +512,10 @@ class DeferredCommandBuffer {
     VkFilter filter;
     // Followed by aligned VkImageBlit[].
     static_assert(alignof(VkImageBlit) <= alignof(uintmax_t));
+  };
+
+  struct ArgsExecuteNested {
+    DeferredCommandBuffer* nested;
   };
 
   struct ArgsVkDispatch {

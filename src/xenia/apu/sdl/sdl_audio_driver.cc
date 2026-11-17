@@ -99,6 +99,12 @@ bool SDLAudioDriver::Initialize() {
     return false;
   }
   sdl_device_channels_ = obtained_spec.channels;
+  XELOGI(
+      "SDLAudioDriver: opened device {} ({} Hz, {} channels, {} samples, "
+      "format {:04X}, driver {})",
+      sdl_device_id_, obtained_spec.freq, obtained_spec.channels,
+      obtained_spec.samples, obtained_spec.format,
+      SDL_GetCurrentAudioDriver() ? SDL_GetCurrentAudioDriver() : "?");
 
   SDL_PauseAudioDevice(sdl_device_id_, 0);
 

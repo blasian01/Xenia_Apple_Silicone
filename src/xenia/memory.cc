@@ -1848,9 +1848,12 @@ XE_NOINLINE void PhysicalHeap::EnableAccessCallbacksInner(
     uint64_t page_flags_bit = uint64_t(1) << (i & 63);
 #endif
 
-    uint32_t guest_page_number = SystemPagenumToGuestPagenum(i);
+    // A system page may span multiple guest pages with different protection
+    // (16 KB host pages over 4 KB guest pages), so it needs to be watched if
+    // any of them is writable by the guest.
     xe::memory::PageAccess current_page_access =
-        ToPageAccess(page_table_ptr[guest_page_number].current_protect);
+        IsSystemPageGuestWritable(i) ? xe::memory::PageAccess::kReadWrite
+                                     : xe::memory::PageAccess::kReadOnly;
     bool protect_system_page = false;
     // Don't do anything with inaccessible pages - don't protect, don't enable
     // callbacks - because real access violations are needed there. And don't
@@ -1892,6 +1895,33 @@ XE_NOINLINE void PhysicalHeap::EnableAccessCallbacksInner(
         protect_access);
   }
 }
+bool PhysicalHeap::IsSystemPageGuestWritable(uint32_t system_page) const {
+  // With host pages larger than guest pages (16 KB on Apple Silicon versus the
+  // 4 KB pages of the 0xE0000000 heap, which is also offset by 4 KB), one
+  // system page covers several guest pages. Checking only the first of them
+  // would leave writes to the others unwatched whenever the first one is not
+  // writable, and the GPU would keep using stale texture and vertex data.
+  uint64_t system_page_start = uint64_t(system_page) << system_page_shift_;
+  uint64_t system_page_end = system_page_start + system_page_size_;
+  uint64_t offset = host_address_offset();
+  if (system_page_end <= offset || page_table_.empty()) {
+    return false;
+  }
+  uint64_t guest_page_first =
+      (system_page_start > offset ? system_page_start - offset : 0) >>
+      page_size_shift_;
+  uint64_t guest_page_last = std::min(
+      (system_page_end - offset - 1) >> page_size_shift_,
+      uint64_t(page_table_.size() - 1));
+  for (uint64_t i = guest_page_first; i <= guest_page_last; ++i) {
+    if (ToPageAccess(page_table_[i].current_protect) ==
+        xe::memory::PageAccess::kReadWrite) {
+      return true;
+    }
+  }
+  return false;
+}
+
 bool PhysicalHeap::TriggerCallbacks(
     global_unique_lock_type global_lock_locked_once, uint32_t virtual_address,
     uint32_t length, bool is_write, bool unwatch_exact_range, bool unprotect) {
@@ -2008,8 +2038,23 @@ bool PhysicalHeap::TriggerCallbacks(
     unwatch_first += host_address_offset();
     unwatch_last += host_address_offset();
     assert_true(unwatch_first <= unwatch_last);
-    system_page_first = unwatch_first >> system_page_shift_;
-    system_page_last = unwatch_last >> system_page_shift_;
+    // Only the system pages lying entirely within the range the callbacks
+    // agreed to stop watching may be unwatched. When system pages are larger
+    // than 4 KB, the 4 KB host address offset of the 0xE0000000 heap makes
+    // them straddle the boundaries of that range, and unwatching a partially
+    // covered page would let writes to memory outside the range (texture and
+    // vertex data the GPU still considers up to date) go unnoticed. The pages
+    // that were actually accessed are always unwatched.
+    uint32_t unwatch_system_page_first =
+        uint32_t((uint64_t(unwatch_first) + (system_page_size_ - 1)) >>
+                 system_page_shift_);
+    uint32_t unwatch_system_page_end =
+        uint32_t((uint64_t(unwatch_last) + 1) >> system_page_shift_);
+    system_page_first = std::min(system_page_first, unwatch_system_page_first);
+    if (unwatch_system_page_end) {
+      system_page_last =
+          std::max(system_page_last, unwatch_system_page_end - 1);
+    }
     block_index_first = system_page_first >> 6;
     block_index_last = system_page_last >> 6;
   }
@@ -2022,14 +2067,8 @@ bool PhysicalHeap::TriggerCallbacks(
       // Check if need to allow writing to this page.
       bool unprotect_page = (system_page_flags_[i >> 6].notify_on_invalidation &
                              (uint64_t(1) << (i & 63))) != 0;
-      if (unprotect_page) {
-        uint32_t guest_page_number =
-            xe::sat_sub(i << system_page_shift_, host_address_offset()) >>
-            page_size_shift_;
-        if (ToPageAccess(page_table_[guest_page_number].current_protect) !=
-            xe::memory::PageAccess::kReadWrite) {
-          unprotect_page = false;
-        }
+      if (unprotect_page && !IsSystemPageGuestWritable(i)) {
+        unprotect_page = false;
       }
       if (unprotect_page) {
         if (unprotect_system_page_first == UINT32_MAX) {

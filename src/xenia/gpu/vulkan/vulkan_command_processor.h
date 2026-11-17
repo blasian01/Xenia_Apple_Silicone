@@ -161,8 +161,38 @@ class VulkanCommandProcessor final : public CommandProcessor {
   // submission.
   DeferredCommandBuffer& deferred_command_buffer() {
     assert_true(submission_open_);
-    return deferred_command_buffer_;
+    return render_pass_hoist_active_ ? *current_render_pass_hoist_buffer_
+                                     : deferred_command_buffer_;
   }
+
+  // If a render target cache render pass is currently open, returns the
+  // command list that is executed right before the beginning of that render
+  // pass, otherwise null. Commands that can't be executed inside a render
+  // pass, but whose results are needed by it, may be written there instead of
+  // ending and restarting the render pass - which is extremely expensive on
+  // tile-based GPUs as all the attachments are stored and loaded again -
+  // provided they don't depend on, or change, anything done earlier in the
+  // render pass, and leave the resources they touch in the state they were in.
+  DeferredCommandBuffer* render_pass_hoist_buffer() {
+    return current_render_pass_ != VK_NULL_HANDLE
+               ? current_render_pass_hoist_buffer_
+               : nullptr;
+  }
+
+  // Number of the most recently begun render target cache render pass
+  // (whether it's still open or not).
+  uint64_t render_pass_serial() const { return render_pass_serial_; }
+  // Redirects deferred_command_buffer(), SubmitBarriers and
+  // BindExternalComputePipeline to the hoist buffer of the currently open
+  // render pass, so a sequence of commands written the usual way is executed
+  // before the render pass instead of ending it. Fails if there's no render
+  // pass to hoist from, or if there are barriers already pending for the
+  // commands that will follow. The caller must leave every resource it touches
+  // in the state the rest of the render pass needs, and must not depend on
+  // anything done in the render pass. Returns whether hoisting has begun, if
+  // true, EndRenderPassHoist must be called.
+  bool BeginRenderPassHoist();
+  void EndRenderPassHoist();
 
   bool submission_open() const { return submission_open_; }
   uint64_t GetCurrentSubmission() const {
@@ -699,6 +729,14 @@ class VulkanCommandProcessor final : public CommandProcessor {
   // framebuffer.
   VkRenderPass current_render_pass_;
   const VulkanRenderTargetCache::Framebuffer* current_framebuffer_;
+  // Command lists executed before each render pass of the current submission,
+  // see render_pass_hoist_buffer.
+  std::vector<std::unique_ptr<DeferredCommandBuffer>>
+      render_pass_hoist_buffers_;
+  size_t render_pass_hoist_buffers_used_ = 0;
+  DeferredCommandBuffer* current_render_pass_hoist_buffer_ = nullptr;
+  bool render_pass_hoist_active_ = false;
+  uint64_t render_pass_serial_ = 0;
 
   // Currently bound graphics pipeline, either from the pipeline cache (with
   // potentially deferred creation - current_external_graphics_pipeline_ is

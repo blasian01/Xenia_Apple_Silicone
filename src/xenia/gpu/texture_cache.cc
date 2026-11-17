@@ -14,8 +14,10 @@
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/base/profiling.h"
+#include "xenia/base/xxhash.h"
 #include "xenia/gpu/gpu_flags.h"
 #include "xenia/gpu/shared_memory.h"
+#include "xenia/memory.h"
 
 DEFINE_int32(
     draw_resolution_scale_x, 1,
@@ -61,6 +63,12 @@ DEFINE_uint32(
     "textures - so with 2x2 resolution scaling, the soft limit will be 360 + "
     "96 MB, and with 3x3, it will be 360 + 216 MB.",
     "GPU");
+DEFINE_bool(
+    texture_cache_skip_unchanged_reloads, true,
+    "When a texture is invalidated by a write to a memory page it shares "
+    "with other data, don't reload it if its own data hasn't changed.",
+    "GPU");
+
 DEFINE_bool(tiled_shared_memory, true,
             "Enable tiled/sparse resources for efficient large address space "
             "support. Disable for graphics debugger compatibility.",
@@ -536,6 +544,48 @@ void TextureCache::Texture::MakeUpToDateAndWatch(
   }
 }
 
+void TextureCache::Texture::MakeOutdatedAndUnwatch(
+    const global_unique_lock_type& global_lock, bool base, bool mips) {
+  SharedMemory& shared_memory = texture_cache().shared_memory();
+  if (base) {
+    base_outdated_ = true;
+    base_hash_valid_ = false;
+    if (base_watch_handle_) {
+      shared_memory.UnwatchMemoryRange(base_watch_handle_);
+      base_watch_handle_ = nullptr;
+    }
+  }
+  if (mips) {
+    mips_outdated_ = true;
+    mips_hash_valid_ = false;
+    if (mips_watch_handle_) {
+      shared_memory.UnwatchMemoryRange(mips_watch_handle_);
+      mips_watch_handle_ = nullptr;
+    }
+  }
+}
+
+bool TextureCache::Texture::UpdateGuestDataHash(bool is_mip) {
+  uint32_t guest_address = (is_mip ? key().mip_page : key().base_page) << 12;
+  uint32_t guest_size = is_mip ? GetGuestMipsSize() : GetGuestBaseSize();
+  uint64_t& hash = is_mip ? mips_hash_ : base_hash_;
+  std::atomic<bool>& hash_valid = is_mip ? mips_hash_valid_ : base_hash_valid_;
+  if (!guest_size || guest_address >= SharedMemory::kBufferSize) {
+    hash_valid = false;
+    return false;
+  }
+  guest_size = std::min(guest_size, SharedMemory::kBufferSize - guest_address);
+  uint64_t new_hash = XXH3_64bits(
+      texture_cache().shared_memory().guest_memory().TranslatePhysical(
+          guest_address),
+      guest_size);
+  // The validity is reset when the GPU writes to the range (the guest memory
+  // is not what the texture is loaded from in this case).
+  bool unchanged = hash_valid.exchange(true) && hash == new_hash;
+  hash = new_hash;
+  return unchanged;
+}
+
 void TextureCache::Texture::MarkAsUsed() {
   // Textures not in usage tracking (track_usage=false) should not be linked.
   if (!in_usage_list_) {
@@ -567,15 +617,22 @@ void TextureCache::Texture::MarkAsUsed() {
 }
 
 void TextureCache::Texture::WatchCallback(
-    [[maybe_unused]] const global_unique_lock_type& global_lock, bool is_mip) {
+    [[maybe_unused]] const global_unique_lock_type& global_lock, bool is_mip,
+    bool invalidated_by_gpu) {
   if (is_mip) {
     assert_not_zero(GetGuestMipsSize());
     mips_outdated_ = true;
     mips_watch_handle_ = nullptr;
+    if (invalidated_by_gpu) {
+      mips_hash_valid_ = false;
+    }
   } else {
     assert_not_zero(GetGuestBaseSize());
     base_outdated_ = true;
     base_watch_handle_ = nullptr;
+    if (invalidated_by_gpu) {
+      base_hash_valid_ = false;
+    }
   }
 }
 
@@ -583,7 +640,7 @@ void TextureCache::WatchCallback(const global_unique_lock_type& global_lock,
                                  void* context, void* data, uint64_t argument,
                                  bool invalidated_by_gpu) {
   Texture& texture = *static_cast<Texture*>(context);
-  texture.WatchCallback(global_lock, argument != 0);
+  texture.WatchCallback(global_lock, argument != 0, invalidated_by_gpu);
   texture.texture_cache().texture_became_outdated_.store(
       true, std::memory_order_release);
 }
@@ -681,112 +738,13 @@ void TextureCache::LoadTexturesData(Texture** textures, uint32_t n_textures) {
     return;
   }
 
-  uint64_t index_base_outdated = 0;
-  uint64_t index_mips_outdated = 0;
-  uint32_t nkept = 0;
-  {
-    auto global_lock = global_critical_region_.Acquire();
-    for (uint32_t i = 0; i < n_textures; ++i) {
-      Texture* current = textures[i];
-
-      auto base_outdated = current->base_outdated(global_lock);
-      auto mips_outdated = current->mips_outdated(global_lock);
-
-      index_base_outdated |= static_cast<uint64_t>(base_outdated) << i;
-      index_mips_outdated |= static_cast<uint64_t>(mips_outdated) << i;
-      if (!base_outdated && !mips_outdated) {
-        textures[i] = nullptr;
-
-      } else {
-        nkept++;
-      }
-    }
-  }
-
-  if (nkept == 0) {
-    return;
-  }
-
+  // Each texture is watched before its data is requested (see
+  // LoadTextureData), so the textures are loaded one by one.
   for (uint32_t i = 0; i < n_textures; ++i) {
-    Texture* p_texture = textures[i];
-    if (!p_texture) {
-      continue;
-    }
-    textures[i] = nullptr;
-    Texture& texture = *p_texture;
-
-    TextureKey texture_key = texture.key();
-    // Implementation may load multiple blocks at once via accesses of up to 128
-    // bits (R32G32B32A32_UINT), so aligning the size to this value to make sure
-    // if the texture is small (especially if it's linear), the last blocks
-    // won't be cut off (hosts may return 0, 0, 0, 0 for the whole
-    // R32G32B32A32_UINT access for the non-16-aligned tail even if 1...15 bytes
-    // are actually provided for it).
-
-    // Request uploading of the texture data to the shared memory.
-    // This is also necessary when resolution scaling is used - the texture
-    // cache relies on shared memory for invalidation of both unscaled and
-    // scaled textures. Plus a texture may be unscaled partially, when only a
-    // portion of its pages is invalidated, in this case we'll need the texture
-    // from the shared memory to load the unscaled parts.
-    // TODO(Triang3l): Load unscaled parts.
-    if (index_base_outdated & (1ULL << i)) {
-      if (!shared_memory().RequestRange(
-              texture_key.base_page << 12,
-              xe::align(texture.GetGuestBaseSize(), UINT32_C(16)))) {
-        continue;
-      }
-    }
-    if (index_mips_outdated & (1ULL << i)) {
-      if (!shared_memory().RequestRange(
-              texture_key.mip_page << 12,
-              xe::align(texture.GetGuestMipsSize(), UINT32_C(16)))) {
-        continue;
-      }
-    }
-    if (texture_key.scaled_resolve) {
-      // Make sure all the scaled resolve memory is resident and accessible from
-      // the shader, including any possible padding that hasn't yet been touched
-      // by an actual resolve, but is still included in the texture size, so the
-      // GPU won't be trying to access unmapped memory.
-      if (!EnsureScaledResolveMemoryCommitted(texture_key.base_page << 12,
-                                              texture.GetGuestBaseSize(), 4)) {
-        continue;
-      }
-      if (!EnsureScaledResolveMemoryCommitted(texture_key.mip_page << 12,
-                                              texture.GetGuestMipsSize(), 4)) {
-        continue;
-      }
-    }
-
-    // Actually load the texture data.
-    if (!LoadTextureDataFromResidentMemoryImpl(
-            texture, (index_base_outdated & (1ULL << i)) != 0,
-            (index_mips_outdated & (1ULL << i)) != 0)) {
-      continue;
-    }
-
-    // reque for makeuptodatandwatch
-    textures[i] = &texture;
-  }
-  {
-    auto crit = global_critical_region_.Acquire();
-
-    for (uint32_t i = 0; i < n_textures; ++i) {
-      auto texture = textures[i];
-      if (!texture) {
-        continue;
-      }
-      // Mark the ranges as uploaded and watch them. This is needed for scaled
-      // resolves as well to detect when the CPU wants to reuse the memory for a
-      // regular texture or a vertex buffer, and thus the scaled resolve version
-      // is not up to date anymore.
-      texture->MakeUpToDateAndWatch(crit);
-
-      texture->LogAction("Loaded");
-    }
+    LoadTextureData(*textures[i]);
   }
 }
+
 bool TextureCache::LoadTextureData(Texture& texture) {
   // Lockless pre-check: if texture appears up-to-date, skip the lock.
   // This is safe because worst case is a false positive (we acquire lock
@@ -795,17 +753,36 @@ bool TextureCache::LoadTextureData(Texture& texture) {
     return true;
   }
 
-  // Check what needs to be uploaded.
+  // Check what needs to be uploaded, and start watching the ranges right away,
+  // before the data is requested. The guest may be writing to the texture
+  // concurrently (streaming it in from another thread), and a write that
+  // happens after the data has been copied to the shared memory, but before
+  // the watch is placed, would never be noticed - the texture would stay
+  // outdated (showing garbage) until something else invalidates it.
   bool base_outdated, mips_outdated;
   {
     auto global_lock = global_critical_region_.Acquire();
     base_outdated = texture.base_outdated(global_lock);
     mips_outdated = texture.mips_outdated(global_lock);
-  }
-  if (!base_outdated && !mips_outdated) {
-    return true;
+    if (!base_outdated && !mips_outdated) {
+      return true;
+    }
+    texture.MakeUpToDateAndWatch(global_lock);
   }
 
+  if (!LoadWatchedTextureData(texture, base_outdated, mips_outdated)) {
+    texture.MakeOutdatedAndUnwatch(global_critical_region_.Acquire(),
+                                   base_outdated, mips_outdated);
+    return false;
+  }
+
+  texture.LogAction("Loaded");
+
+  return true;
+}
+
+bool TextureCache::LoadWatchedTextureData(Texture& texture, bool base_outdated,
+                                          bool mips_outdated) {
   TextureKey texture_key = texture.key();
 
   // Implementation may load multiple blocks at once via accesses of up to 128
@@ -849,23 +826,26 @@ bool TextureCache::LoadTextureData(Texture& texture) {
                                             texture.GetGuestMipsSize(), 4)) {
       return false;
     }
+  } else if (cvars::texture_cache_skip_unchanged_reloads) {
+    // Invalidation is page-granular, so writes to unrelated data sharing a
+    // page with the texture (vertices generated every frame, for instance)
+    // make the texture outdated without changing it. Reloading it costs a
+    // host render pass restart, which is very expensive on tile-based GPUs,
+    // so don't do that if the guest data is the same as what was loaded.
+    if (base_outdated && texture.UpdateGuestDataHash(false)) {
+      base_outdated = false;
+    }
+    if (mips_outdated && texture.UpdateGuestDataHash(true)) {
+      mips_outdated = false;
+    }
+    if (!base_outdated && !mips_outdated) {
+      return true;
+    }
   }
 
   // Actually load the texture data.
-  if (!LoadTextureDataFromResidentMemoryImpl(texture, base_outdated,
-                                             mips_outdated)) {
-    return false;
-  }
-
-  // Mark the ranges as uploaded and watch them. This is needed for scaled
-  // resolves as well to detect when the CPU wants to reuse the memory for a
-  // regular texture or a vertex buffer, and thus the scaled resolve version is
-  // not up to date anymore.
-  texture.MakeUpToDateAndWatch(global_critical_region_.Acquire());
-
-  texture.LogAction("Loaded");
-
-  return true;
+  return LoadTextureDataFromResidentMemoryImpl(texture, base_outdated,
+                                               mips_outdated);
 }
 
 void TextureCache::BindingInfoFromFetchConstant(

@@ -289,6 +289,10 @@ class PhysicalHeap : public BaseHeap {
            page_size_shift_;
   }
 
+  // Whether any guest page overlapping the system (host) page can be written
+  // to by the guest.
+  bool IsSystemPageGuestWritable(uint32_t system_page) const;
+
   uint32_t GuestPagenumToSystemPagenum(uint32_t num) {
     num <<= page_size_shift_;
     num += host_address_offset();

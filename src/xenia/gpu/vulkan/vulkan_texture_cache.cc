@@ -30,6 +30,18 @@
 
 DECLARE_bool(tiled_shared_memory);
 
+DEFINE_bool(
+    vulkan_hoist_texture_loads, true,
+    "Load a texture that's needed in the middle of a host render pass, but "
+    "hasn't been used in it yet, before that render pass instead of "
+    "interrupting it (interrupting is very slow on tile-based GPUs).",
+    "Vulkan");
+
+DEFINE_bool(vulkan_decompress_s3tc, false,
+            "Decompress S3TC (DXT / DXN) textures on load instead of using "
+            "the host's BC formats, even when the host supports them.",
+            "Vulkan");
+
 namespace xe {
 namespace gpu {
 namespace vulkan {
@@ -566,6 +578,8 @@ void VulkanTextureCache::RequestTextures(uint32_t used_texture_mask) {
     if (binding_texture != nullptr) {
       // Will be referenced by the command buffer, so mark as used.
       binding_texture->MarkAsUsed();
+      binding_texture->SetLastDrawRenderPassSerial(
+          command_processor_.render_pass_serial());
       VulkanTexture::Usage old_usage =
           binding_texture->SetUsage(VulkanTexture::Usage::kGuestShaderSampled);
       if (old_usage != VulkanTexture::Usage::kGuestShaderSampled) {
@@ -585,6 +599,8 @@ void VulkanTextureCache::RequestTextures(uint32_t used_texture_mask) {
         static_cast<VulkanTexture*>(binding->texture_signed);
     if (binding_texture_signed != nullptr) {
       binding_texture_signed->MarkAsUsed();
+      binding_texture_signed->SetLastDrawRenderPassSerial(
+          command_processor_.render_pass_serial());
       VulkanTexture::Usage old_usage = binding_texture_signed->SetUsage(
           VulkanTexture::Usage::kGuestShaderSampled);
       if (old_usage != VulkanTexture::Usage::kGuestShaderSampled) {
@@ -1168,6 +1184,29 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
   }
   const LoadShaderInfo& load_shader_info = GetLoadShaderInfo(load_shader);
 
+  // If the texture is needed in the middle of a render pass, but hasn't been
+  // drawn with in it yet (the usual case being a render-to-texture result
+  // that has just been resolved), load it before the render pass rather than
+  // interrupting it. A draw stamps the texture with the serial of the render
+  // pass that was the most recent when it requested the texture, and may
+  // itself be in that render pass or in the next one.
+  struct RenderPassHoistScope {
+    VulkanCommandProcessor& command_processor;
+    bool active;
+    ~RenderPassHoistScope() {
+      if (active) {
+        command_processor.EndRenderPassHoist();
+      }
+    }
+  };
+  RenderPassHoistScope hoist_scope{command_processor_, false};
+  if (cvars::vulkan_hoist_texture_loads && !texture_key.scaled_resolve &&
+      vulkan_texture.last_draw_render_pass_serial() + 1 <
+          command_processor_.render_pass_serial() &&
+      static_cast<VulkanSharedMemory&>(shared_memory()).IsUsedForReading()) {
+    hoist_scope.active = command_processor_.BeginRenderPassHoist();
+  }
+
   // Get the guest layout.
   const texture_util::TextureGuestLayout& guest_layout =
       vulkan_texture.guest_layout();
@@ -1744,6 +1783,25 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
     }
   }
 
+  if (hoist_scope.active) {
+    // The render pass will sample the texture - make it ready for that here,
+    // as a barrier would end the render pass.
+    VkPipelineStageFlags texture_src_stage_mask, texture_dst_stage_mask;
+    VkAccessFlags texture_src_access_mask, texture_dst_access_mask;
+    VkImageLayout texture_old_layout, texture_new_layout;
+    GetTextureUsageMasks(VulkanTexture::Usage::kTransferDestination,
+                         texture_src_stage_mask, texture_src_access_mask,
+                         texture_old_layout);
+    GetTextureUsageMasks(VulkanTexture::Usage::kGuestShaderSampled,
+                         texture_dst_stage_mask, texture_dst_access_mask,
+                         texture_new_layout);
+    vulkan_texture.SetUsage(VulkanTexture::Usage::kGuestShaderSampled);
+    command_processor_.PushImageMemoryBarrier(
+        vulkan_texture.image(), ui::vulkan::util::InitializeSubresourceRange(),
+        texture_src_stage_mask, texture_dst_stage_mask, texture_src_access_mask,
+        texture_dst_access_mask, texture_old_layout, texture_new_layout);
+  }
+
   return true;
 }
 
@@ -2155,7 +2213,8 @@ bool VulkanTextureCache::Initialize() {
               VK_FORMAT_BC1_RGBA_UNORM_BLOCK);
   ifn.vkGetPhysicalDeviceFormatProperties(
       physical_device, VK_FORMAT_BC1_RGBA_UNORM_BLOCK, &format_properties);
-  if ((format_properties.optimalTilingFeatures & kLinearFilterFeatures) !=
+  if (cvars::vulkan_decompress_s3tc ||
+      (format_properties.optimalTilingFeatures & kLinearFilterFeatures) !=
       kLinearFilterFeatures) {
     host_format_dxt1.format_unsigned.load_shader = kLoadShaderIndexDXT1ToRGBA8;
     host_format_dxt1.format_unsigned.format = VK_FORMAT_R8G8B8A8_UNORM;
@@ -2169,7 +2228,8 @@ bool VulkanTextureCache::Initialize() {
               VK_FORMAT_BC2_UNORM_BLOCK);
   ifn.vkGetPhysicalDeviceFormatProperties(
       physical_device, VK_FORMAT_BC2_UNORM_BLOCK, &format_properties);
-  if ((format_properties.optimalTilingFeatures & kLinearFilterFeatures) !=
+  if (cvars::vulkan_decompress_s3tc ||
+      (format_properties.optimalTilingFeatures & kLinearFilterFeatures) !=
       kLinearFilterFeatures) {
     host_format_dxt2_3.format_unsigned.load_shader =
         kLoadShaderIndexDXT3ToRGBA8;
@@ -2184,7 +2244,8 @@ bool VulkanTextureCache::Initialize() {
               VK_FORMAT_BC3_UNORM_BLOCK);
   ifn.vkGetPhysicalDeviceFormatProperties(
       physical_device, VK_FORMAT_BC3_UNORM_BLOCK, &format_properties);
-  if ((format_properties.optimalTilingFeatures & kLinearFilterFeatures) !=
+  if (cvars::vulkan_decompress_s3tc ||
+      (format_properties.optimalTilingFeatures & kLinearFilterFeatures) !=
       kLinearFilterFeatures) {
     host_format_dxt4_5.format_unsigned.load_shader =
         kLoadShaderIndexDXT5ToRGBA8;
@@ -2199,7 +2260,8 @@ bool VulkanTextureCache::Initialize() {
               VK_FORMAT_BC5_UNORM_BLOCK);
   ifn.vkGetPhysicalDeviceFormatProperties(
       physical_device, VK_FORMAT_BC5_UNORM_BLOCK, &format_properties);
-  if ((format_properties.optimalTilingFeatures & kLinearFilterFeatures) !=
+  if (cvars::vulkan_decompress_s3tc ||
+      (format_properties.optimalTilingFeatures & kLinearFilterFeatures) !=
       kLinearFilterFeatures) {
     host_format_dxn.format_unsigned.load_shader = kLoadShaderIndexDXNToRG8;
     host_format_dxn.format_unsigned.format = VK_FORMAT_R8G8_UNORM;
@@ -2211,7 +2273,8 @@ bool VulkanTextureCache::Initialize() {
               VK_FORMAT_BC4_UNORM_BLOCK);
   ifn.vkGetPhysicalDeviceFormatProperties(
       physical_device, VK_FORMAT_BC4_UNORM_BLOCK, &format_properties);
-  if ((format_properties.optimalTilingFeatures & kLinearFilterFeatures) !=
+  if (cvars::vulkan_decompress_s3tc ||
+      (format_properties.optimalTilingFeatures & kLinearFilterFeatures) !=
       kLinearFilterFeatures) {
     host_format_dxt5a.format_unsigned.load_shader = kLoadShaderIndexDXT5AToR8;
     host_format_dxt5a.format_unsigned.format = VK_FORMAT_R8_UNORM;
