@@ -723,3 +723,15 @@ DEFINE_OPCODE(
     "reserved_store",
     OPCODE_SIG_V_V_V,
     OPCODE_FLAG_MEMORY)
+
+DEFINE_OPCODE(
+    OPCODE_CLEAR_FP_STATUS,
+    "clear_fp_status",
+    OPCODE_SIG_X,
+    OPCODE_FLAG_VOLATILE)
+
+DEFINE_OPCODE(
+    OPCODE_LOAD_FP_STATUS,
+    "load_fp_status",
+    OPCODE_SIG_V,
+    OPCODE_FLAG_VOLATILE)

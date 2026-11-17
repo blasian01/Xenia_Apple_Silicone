@@ -6,8 +6,12 @@
 #include <atomic>
 #include <cmath>
 #include <cstring>
+#include <limits>
+#include <string_view>
+#include <type_traits>
 
 #include "xenia/base/byte_order.h"
+#include "xenia/base/clock.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/cpu/backend/a64/a64_backend.h"
@@ -34,10 +38,6 @@ std::unordered_map<uint32_t, SequenceSelectFn> sequence_table;
 thread_local const Instr* current_instr_for_logging = nullptr;
 thread_local A64Emitter* current_emitter_for_logging = nullptr;
 
-enum : uint32_t {
-  kA64BackendHasReserveBit = 0,
-};
-
 static constexpr uint32_t kA64BackendHasReserveMask =
     1u << kA64BackendHasReserveBit;
 static constexpr uintptr_t kMinimumLikelyHostPointer = 0x100000000ull;
@@ -53,7 +53,13 @@ static constexpr uint64_t kTrackedContextOffsetR30 =
 static constexpr uint64_t kTrackedCountFieldStageRawLoad = 0;
 static constexpr uint64_t kTrackedCountFieldStageByteSwap = 1;
 
+// The tracing below targets specific guest addresses of one title and was
+// used while bringing the backend up. It changes the code emitted for those
+// addresses in any title, so it stays off unless explicitly re-enabled here.
+static constexpr bool kEnableTitleSpecificTracing = false;
+
 static bool ShouldLogPossibleGuestReturnMismatch(uint32_t guest_function) {
+  if (!kEnableTitleSpecificTracing) return false;
   switch (guest_function) {
     case 0x820AF3F0:
     case 0x820AF414:
@@ -67,6 +73,7 @@ static bool ShouldLogPossibleGuestReturnMismatch(uint32_t guest_function) {
 }
 
 static bool ShouldLogPreparedReturnAddress(uint32_t guest_function) {
+  if (!kEnableTitleSpecificTracing) return false;
   switch (guest_function) {
     case 0x820AF430:
       return true;
@@ -76,7 +83,8 @@ static bool ShouldLogPreparedReturnAddress(uint32_t guest_function) {
 }
 
 static bool ShouldTraceContextAccess(uint32_t guest_function, uint64_t offset) {
-  if (guest_function != kTrackedContextGuestFunction) {
+  if (!kEnableTitleSpecificTracing ||
+      guest_function != kTrackedContextGuestFunction) {
     return false;
   }
   switch (offset) {
@@ -204,7 +212,17 @@ static GReg LoadGPR(A64Emitter& e, const Value* v, GReg scratch) {
     return scratch;
   }
   if (VALUE_IS_CONSTANT(v)) {
-    e.MovImm64(scratch, v->constant.i64);
+    // Sub-64-bit values live zero-extended in host registers, so constants
+    // must be materialized the same way (the constant union holds them
+    // sign-extended).
+    uint64_t value = v->constant.u64;
+    switch (v->type) {
+      case INT8_TYPE:  value &= 0xFF; break;
+      case INT16_TYPE: value &= 0xFFFF; break;
+      case INT32_TYPE: value &= 0xFFFFFFFFull; break;
+      default: break;
+    }
+    e.MovImm64(scratch, value);
     return scratch;
   }
   return GR(v);
@@ -243,6 +261,102 @@ static VReg LoadVec128(A64Emitter& e, const Value* v, VReg scratch) {
     return scratch;
   }
   return VR(v);
+}
+
+// Loads a scalar FLOAT32/FLOAT64 operand into a register, materializing
+// constants into the given scratch (clobbers kScratch0 for constants).
+static VReg LoadFP(A64Emitter& e, const Value* v, VReg scratch) {
+  if (VALUE_IS_CONSTANT(v)) {
+    if (v->type == FLOAT32_TYPE) {
+      e.MovImm64(kScratch0, v->constant.u32);
+      e.asm_().FMOV_SW(scratch, kScratch0);
+    } else {
+      e.MovImm64(kScratch0, v->constant.u64);
+      e.asm_().FMOV_DX(scratch, kScratch0);
+    }
+    return scratch;
+  }
+  return VR(v);
+}
+
+static constexpr VReg kVScratch3 = V3;
+
+// Selects the FP environment for an operation on `type`: VEC128 float math
+// runs in the VMX environment, scalar math in the FPU one.
+static void SetFpMode(A64Emitter& e, TypeName type) {
+  e.ChangeFpcrMode(type == VEC128_TYPE ? A64Emitter::FpcrMode::Vmx
+                                       : A64Emitter::FpcrMode::Fpu);
+}
+
+static constexpr VReg kVScratch4 = V4;
+static constexpr VReg kVScratch5 = V5;
+static constexpr VReg kVScratch6 = V6;
+
+// PowerPC NaN results differ from ARM's: the result is the first NaN operand
+// in instruction operand order (frA, frB, frC), quieted, regardless of
+// signalling-ness, and never negated; an invalid operation without NaN
+// operands yields the positive default QNaN. These fix-ups rewrite `result`
+// (which must not alias any operand) on the cold path where it is a NaN.
+// `ops` are in priority order. Clobbers kScratch0/kScratch1, kVScratch5.
+static void EmitScalarNaNFixup(A64Emitter& e, VReg result, const VReg* ops,
+                               size_t op_count, bool is_f32) {
+  a64::Label done;
+  if (is_f32) e.asm_().FCMP_S(result, result);
+  else e.asm_().FCMP_D(result, result);
+  e.asm_().B(VC, &done);
+  if (is_f32) {
+    e.MovImm64(kScratch0, 0x7FC00000u);
+    e.asm_().FMOV_SW(kVScratch5, kScratch0);
+  } else {
+    e.MovImm64(kScratch0, 0x7FF8000000000000ull);
+    e.asm_().FMOV_DX(kVScratch5, kScratch0);
+  }
+  for (size_t n = op_count; n-- > 0;) {
+    if (is_f32) {
+      e.asm_().FCMP_S(ops[n], ops[n]);
+      e.asm_().FCSEL_S(kVScratch5, ops[n], kVScratch5, VS);
+    } else {
+      e.asm_().FCMP_D(ops[n], ops[n]);
+      e.asm_().FCSEL_D(kVScratch5, ops[n], kVScratch5, VS);
+    }
+  }
+  if (is_f32) {
+    e.asm_().FMOV_WS(kScratch0, kVScratch5);
+    e.MovImm64(kScratch1, 0x00400000u);
+    e.asm_().ORR(kScratch0, kScratch0, kScratch1);
+    e.asm_().FMOV_SW(result, kScratch0);
+  } else {
+    e.asm_().FMOV_XD(kScratch0, kVScratch5);
+    e.MovImm64(kScratch1, 0x0008000000000000ull);
+    e.asm_().ORR(kScratch0, kScratch0, kScratch1);
+    e.asm_().FMOV_DX(result, kScratch0);
+  }
+  e.asm_().Bind(&done);
+}
+
+// Per-lane (4 x f32) variant. Clobbers kScratch0, kVScratch4-6.
+static void EmitVectorNaNFixup(A64Emitter& e, VReg result, const VReg* ops,
+                               size_t op_count) {
+  a64::Label done;
+  e.asm_().FCMEQ_4S(kVScratch4, result, result);
+  e.asm_().NOT_16B(kVScratch4, kVScratch4);  // lanes where result is NaN
+  e.asm_().UMAXV_4S(kVScratch6, kVScratch4);
+  e.asm_().FMOV_WS(kScratch0, kVScratch6);
+  e.asm_().CBZ(kScratch0, &done);
+  e.MovImm64(kScratch0, 0x7FC00000u);
+  e.asm_().DUP_4S(kVScratch5, kScratch0);
+  for (size_t n = op_count; n-- > 0;) {
+    // candidate = op is NaN ? op : candidate
+    e.asm_().FCMEQ_4S(kVScratch6, ops[n], ops[n]);
+    e.asm_().BSL_16B(kVScratch6, kVScratch5, ops[n]);
+    e.asm_().MOV_16B(kVScratch5, kVScratch6);
+  }
+  e.MovImm64(kScratch0, 0x00400000u);
+  e.asm_().DUP_4S(kVScratch6, kScratch0);
+  e.asm_().ORR_16B(kVScratch5, kVScratch5, kVScratch6);
+  e.asm_().BSL_16B(kVScratch4, kVScratch5, result);
+  e.asm_().MOV_16B(result, kVScratch4);
+  e.asm_().Bind(&done);
 }
 
 static const vec128_t kByteSwapMaskVec128 =
@@ -507,12 +621,6 @@ extern "C" uint64_t A64LoadMmio(void* raw_context, uint64_t mmio_range_ptr,
   // the x64 LOAD_MMIO sequence does.
   uint32_t value = mmio_range->read(raw_context, mmio_range->callback_context,
                                     static_cast<uint32_t>(guest_address));
-  static std::atomic<uint64_t> load_count{0};
-  const uint64_t count = ++load_count;
-  if (count <= 20 || (count % 10000) == 0) {
-    XELOGI("ARM64: MMIO load #{} addr={:08X} -> {:08X}", count,
-           static_cast<uint32_t>(guest_address), value);
-  }
   return xe::byte_swap(value);
 }
 
@@ -527,12 +635,6 @@ extern "C" uint64_t A64StoreMmio(void* raw_context, uint64_t mmio_range_ptr,
   // The incoming value passed through the HIR's byte_swap; undo it so the
   // callback sees host order (mirrors the x64 STORE_MMIO bswap).
   uint32_t value = xe::byte_swap(static_cast<uint32_t>(guest_address_and_value));
-  static std::atomic<uint64_t> store_count{0};
-  const uint64_t count = ++store_count;
-  if (count <= 20 || (count % 10000) == 0) {
-    XELOGI("ARM64: MMIO store #{} addr={:08X} value={:08X}", count,
-           guest_address, value);
-  }
   mmio_range->write(raw_context, mmio_range->callback_context, guest_address,
                     value);
   return 0;
@@ -552,13 +654,18 @@ static uint64_t A64AccessVectorSide(void* raw_context, uint64_t guest_address,
   return 0;
 }
 
+// lvlx/lvrx/stvlx/stvrx: partial vector transfers within the 16-byte block
+// containing the address. `scratch` holds the vector in host layout, where
+// guest byte k lives at index k ^ 3.
 extern "C" uint64_t A64LoadVectorLeft(void* raw_context, uint64_t guest_address,
                                       uint64_t unused) {
   return A64AccessVectorSide(
       raw_context, guest_address,
       [](uint8_t* scratch, uint8_t* host_ptr, uint32_t eb) {
         std::memset(scratch, 0, 16);
-        std::memcpy(scratch, host_ptr, 16 - eb);
+        for (uint32_t k = 0; k < 16 - eb; ++k) {
+          scratch[k ^ 3] = host_ptr[k];
+        }
       });
 }
 
@@ -569,8 +676,9 @@ extern "C" uint64_t A64LoadVectorRight(void* raw_context,
       raw_context, guest_address,
       [](uint8_t* scratch, uint8_t* host_ptr, uint32_t eb) {
         std::memset(scratch, 0, 16);
-        if (eb) {
-          std::memcpy(scratch + (16 - eb), host_ptr, eb);
+        const uint8_t* block = host_ptr - eb;
+        for (uint32_t k = 0; k < eb; ++k) {
+          scratch[(16 - eb + k) ^ 3] = block[k];
         }
       });
 }
@@ -581,7 +689,9 @@ extern "C" uint64_t A64StoreVectorLeft(void* raw_context,
   return A64AccessVectorSide(
       raw_context, guest_address,
       [](uint8_t* scratch, uint8_t* host_ptr, uint32_t eb) {
-        std::memcpy(host_ptr, scratch, 16 - eb);
+        for (uint32_t k = 0; k < 16 - eb; ++k) {
+          host_ptr[k] = scratch[k ^ 3];
+        }
       });
 }
 
@@ -591,8 +701,9 @@ extern "C" uint64_t A64StoreVectorRight(void* raw_context,
   return A64AccessVectorSide(
       raw_context, guest_address,
       [](uint8_t* scratch, uint8_t* host_ptr, uint32_t eb) {
-        if (eb) {
-          std::memcpy(host_ptr, scratch + (16 - eb), eb);
+        uint8_t* block = host_ptr - eb;
+        for (uint32_t k = 0; k < eb; ++k) {
+          block[k] = scratch[(16 - eb + k) ^ 3];
         }
       });
 }
@@ -646,7 +757,8 @@ extern "C" uint64_t A64PackD3DCOLOR(void* raw_context, uint64_t arg0,
     uint32_t hi_bits = 0x404000FF;
     float hi;
     std::memcpy(&hi, &hi_bits, sizeof(hi));
-    f = std::min(std::max(f, lo), hi);
+    if (!(f >= lo)) f = lo;  // NaN packs as the minimum, like vmaxps
+    if (f > hi) f = hi;
     uint32_t bits;
     std::memcpy(&bits, &f, sizeof(bits));
     return bits & 0xFF;
@@ -801,11 +913,17 @@ extern "C" uint64_t A64Log2(void* raw_context, uint64_t shape,
       std::memcpy(&value->u64[0], &d, sizeof(d));
       break;
     }
-    default:
+    default: {
+      // vlogefp: in non-Java mode denormal inputs read as (signed) zero.
+      const bool njm = (backend_context->fpcr_vmx & kA64FpcrFlushToZero) != 0;
       for (int i = 0; i < 4; ++i) {
+        if (njm && !(value->u32[i] & 0x7F800000u)) {
+          value->u32[i] &= 0x80000000u;
+        }
         value->f32[i] = std::log2(value->f32[i]);
       }
       break;
+    }
   }
   return 0;
 }
@@ -941,6 +1059,7 @@ extern "C" uint64_t A64LogTrackedLoopSetup(void* raw_context,
 
 static bool ShouldTraceLoopSetupStore(A64Emitter& e, const Instr* i,
                                       uint64_t offset) {
+  if (!kEnableTitleSpecificTracing) return false;
   if (e.current_guest_function() != kTrackedContextGuestFunction ||
       offset != kTrackedContextOffsetR28) {
     return false;
@@ -986,6 +1105,7 @@ extern "C" uint64_t A64LogTrackedCountField(void* raw_context, uint64_t stage,
 }
 
 static bool ShouldTraceCountFieldLoadOffset(A64Emitter& e, const Instr* i) {
+  if (!kEnableTitleSpecificTracing) return false;
   if (e.current_guest_function() != kTrackedContextGuestFunction ||
       i->dest->type != INT32_TYPE || !i->src2.value ||
       !VALUE_IS_CONSTANT(i->src2.value) ||
@@ -996,6 +1116,7 @@ static bool ShouldTraceCountFieldLoadOffset(A64Emitter& e, const Instr* i) {
 }
 
 static bool ShouldTraceCountFieldByteSwap(A64Emitter& e, const Instr* i) {
+  if (!kEnableTitleSpecificTracing) return false;
   if (e.current_guest_function() != kTrackedContextGuestFunction ||
       !i->src1.value || !i->src1.value->def ||
       i->src1.value->def->GetOpcodeNum() != OPCODE_LOAD_OFFSET) {
@@ -1061,7 +1182,7 @@ static void EmitTailBranch(A64Emitter& e, GReg target_reg) {
   e.asm_().LDP(X27, X28, X29, StackLayout::GUEST_GPR_SAVE + 0x30);
 
   e.asm_().LDP(X29, X30, SP, 0);
-  e.asm_().ADD(SP, SP, static_cast<int32_t>(total));
+  e.AdjustStackPointer(total, false);
   e.asm_().BR(target_reg);
 }
 
@@ -1263,8 +1384,55 @@ static bool EmitDebugBreakTrue(A64Emitter& e, const Instr* i) {
   return true;
 }
 
+extern "C" uint64_t A64TrapDebugPrint(void* raw_context, uint64_t unused0,
+                                      uint64_t unused1) {
+  // 'twi 31, r0, 20/26' is a debug print: r3 = buffer, r4 = length.
+  auto* context = reinterpret_cast<ppc::PPCContext_s*>(raw_context);
+  const uint32_t str_ptr = static_cast<uint32_t>(context->r[3]);
+  const uint32_t str_length = static_cast<uint32_t>(context->r[4]);
+  auto* str = context->TranslateVirtual<const char*>(str_ptr);
+  if (str && str_length < 0x10000) {
+    XELOGD("(DebugPrint) {}", std::string_view(str, str_length));
+  }
+  return 0;
+}
+
+extern "C" uint64_t A64TrapDebugBreak(void* raw_context, uint64_t unused0,
+                                      uint64_t unused1) {
+  XELOGE("tw/td forced trap hit! This should be a crash!");
+  return 0;
+}
+
+// Mirrors X64Emitter::Trap: known trap types are serviced (or ignored) and
+// execution continues; unknown ones break.
+static void EmitTrapForType(A64Emitter& e, uint32_t trap_type) {
+  uint64_t helper = 0;
+  switch (trap_type) {
+    case 20:
+    case 26:
+      helper = reinterpret_cast<uint64_t>(&A64TrapDebugPrint);
+      break;
+    case 0:
+    case 22:
+      helper = reinterpret_cast<uint64_t>(&A64TrapDebugBreak);
+      break;
+    case 25:
+      return;
+    default:
+      e.asm_().BRK(0);
+      return;
+  }
+  e.MovImm64(X0, helper);
+  e.MovImm64(X1, 0);
+  e.MovImm64(X2, 0);
+  auto backend = static_cast<A64Backend*>(e.backend());
+  e.MovImm64(kScratch0,
+             reinterpret_cast<uint64_t>(backend->guest_to_host_thunk()));
+  e.asm_().BLR(kScratch0);
+}
+
 static bool EmitTrap(A64Emitter& e, const Instr* i) {
-  e.asm_().BRK(0);
+  EmitTrapForType(e, i->flags);
   return true;
 }
 
@@ -1275,11 +1443,11 @@ static bool EmitTrapTrue(A64Emitter& e, const Instr* i) {
   }
   a64::Label skip;
   if (MaybeEmitConditionalSkip(e, cond, &skip)) {
-    e.asm_().BRK(0);
+    EmitTrapForType(e, i->flags);
     e.asm_().Bind(&skip);
     return true;
   }
-  e.asm_().BRK(0);
+  EmitTrapForType(e, i->flags);
   return true;
 }
 
@@ -2129,6 +2297,17 @@ static bool EmitStoreOffset(A64Emitter& e, const Instr* i) {
   return true;
 }
 
+// Masks a folded constant to the destination's integer width so it satisfies
+// the same zero-extension invariant.
+static uint64_t MaskToType(uint64_t value, TypeName type) {
+  switch (type) {
+    case INT8_TYPE:  return value & 0xFF;
+    case INT16_TYPE: return value & 0xFFFF;
+    case INT32_TYPE: return value & 0xFFFFFFFF;
+    default:         return value;
+  }
+}
+
 // === Assign / Type Conversions ===
 
 static bool EmitAssign(A64Emitter& e, const Instr* i) {
@@ -2139,7 +2318,7 @@ static bool EmitAssign(A64Emitter& e, const Instr* i) {
   if (src->type <= INT64_TYPE) {
     GReg rd = GR(i->dest);
     if (VALUE_IS_CONSTANT(src)) {
-      e.MovImm64(rd, src->constant.i64);
+      e.MovImm64(rd, MaskToType(src->constant.u64, src->type));
     } else if (IsAlloc(src)) {
       e.asm_().MOV(rd, GR(src));
     }
@@ -2158,17 +2337,23 @@ static bool EmitCast(A64Emitter& e, const Instr* i) {
   if (!i->dest || !IsAlloc(i->dest)) return true;
   auto src = i->src1.value;
   if (!src) return true;
+  const TypeName st = src->type, dt = i->dest->type;
 
-  // Cast between int and float of same size
-  if (src->type <= INT64_TYPE && i->dest->type >= FLOAT32_TYPE) {
-    // Int → FP register
-    GReg rs = VALUE_IS_CONSTANT(src) ? kScratch0 : GR(src);
-    if (VALUE_IS_CONSTANT(src)) e.MovImm64(rs, src->constant.i64);
-    e.asm_().FMOV_DX(VR(i->dest), rs);
-  } else if (src->type >= FLOAT32_TYPE && i->dest->type <= INT64_TYPE) {
-    // FP register → Int
-    if (IsAlloc(src)) {
-      e.asm_().FMOV_XD(GR(i->dest), VR(src));
+  if (st <= INT64_TYPE && (dt == FLOAT32_TYPE || dt == FLOAT64_TYPE)) {
+    // Raw bits: int -> FP register.
+    GReg rs = LoadGPR(e, src, kScratch0);
+    if (dt == FLOAT32_TYPE) {
+      e.asm_().FMOV_SW(VR(i->dest), rs);
+    } else {
+      e.asm_().FMOV_DX(VR(i->dest), rs);
+    }
+  } else if ((st == FLOAT32_TYPE || st == FLOAT64_TYPE) && dt <= INT64_TYPE) {
+    // Raw bits: FP register -> int.
+    VReg vs = LoadFP(e, src, kVScratch0);
+    if (st == FLOAT32_TYPE) {
+      e.asm_().FMOV_WS(GR(i->dest), vs);
+    } else {
+      e.asm_().FMOV_XD(GR(i->dest), vs);
     }
   } else {
     // Same domain — just move
@@ -2221,7 +2406,7 @@ static bool EmitSignExtend(A64Emitter& e, const Instr* i) {
       case INT64_TYPE: val = src->constant.i64; break;
       default: break;
     }
-    e.MovImm64(rd, (uint64_t)val);
+    e.MovImm64(rd, MaskToType((uint64_t)val, i->dest->type));
   } else if (IsAlloc(src)) {
     GReg rs = GR(src);
     switch (src->type) {
@@ -2230,6 +2415,12 @@ static bool EmitSignExtend(A64Emitter& e, const Instr* i) {
       case INT32_TYPE: e.asm_().SXTW(rd, rs); break;
       case INT64_TYPE: e.asm_().MOV(rd, rs); break;
       default: break;
+    }
+    // Keep narrower-than-64-bit results zero-extended in the host register.
+    if (i->dest->type == INT16_TYPE) {
+      e.asm_().UXTH(rd, rd);
+    } else if (i->dest->type == INT32_TYPE) {
+      e.asm_().MOVw(rd, rd);
     }
   }
   return true;
@@ -2277,36 +2468,30 @@ static void ZeroExtendSubword(A64Emitter& e, GReg rd, TypeName type) {
   }
 }
 
-// Masks a folded constant to the destination's integer width so it satisfies
-// the same zero-extension invariant.
-static uint64_t MaskToType(uint64_t value, TypeName type) {
-  switch (type) {
-    case INT8_TYPE:  return value & 0xFF;
-    case INT16_TYPE: return value & 0xFFFF;
-    case INT32_TYPE: return value & 0xFFFFFFFF;
-    default:         return value;
-  }
-}
-
 static bool EmitAdd(A64Emitter& e, const Instr* i) {
   if (!i->dest || !IsAlloc(i->dest)) return true;
   auto s1 = i->src1.value, s2 = i->src2.value;
   GReg rd = GR(i->dest);
+  const TypeName t = i->dest->type;
 
   if (VALUE_IS_CONSTANT(s1) && VALUE_IS_CONSTANT(s2)) {
-    e.MovImm64(rd, MaskToType(s1->constant.i64 + s2->constant.i64,
-                              i->dest->type));
+    e.MovImm64(rd, MaskToType(s1->constant.i64 + s2->constant.i64, t));
   } else if (VALUE_IS_CONSTANT(s2) &&
-             (s2->constant.u64 & 0xFFF) == s2->constant.u64) {
+             MaskToType(s2->constant.u64, t) <= 0xFFF) {
     GReg r1 = LoadGPR(e, s1, kScratch0);
-    e.asm_().ADD(rd, r1, (uint32_t)s2->constant.u64);
-    ZeroExtendSubword(e, rd, i->dest->type);
+    const uint32_t imm = static_cast<uint32_t>(MaskToType(s2->constant.u64, t));
+    if (t <= INT32_TYPE) {
+      e.asm_().ADDw(rd, r1, imm);
+      ZeroExtendSubword(e, rd, t);
+    } else {
+      e.asm_().ADD(rd, r1, imm);
+    }
   } else {
     GReg r1 = LoadGPR(e, s1, kScratch0);
     GReg r2 = LoadGPR(e, s2, kScratch1);
-    if (i->dest->type <= INT32_TYPE) {
+    if (t <= INT32_TYPE) {
       e.asm_().ADDw(rd, r1, r2);
-      ZeroExtendSubword(e, rd, i->dest->type);
+      ZeroExtendSubword(e, rd, t);
     } else {
       e.asm_().ADD(rd, r1, r2);
     }
@@ -2318,21 +2503,26 @@ static bool EmitSub(A64Emitter& e, const Instr* i) {
   if (!i->dest || !IsAlloc(i->dest)) return true;
   auto s1 = i->src1.value, s2 = i->src2.value;
   GReg rd = GR(i->dest);
+  const TypeName t = i->dest->type;
 
   if (VALUE_IS_CONSTANT(s1) && VALUE_IS_CONSTANT(s2)) {
-    e.MovImm64(rd, MaskToType(s1->constant.i64 - s2->constant.i64,
-                              i->dest->type));
+    e.MovImm64(rd, MaskToType(s1->constant.i64 - s2->constant.i64, t));
   } else if (VALUE_IS_CONSTANT(s2) &&
-             (s2->constant.u64 & 0xFFF) == s2->constant.u64) {
+             MaskToType(s2->constant.u64, t) <= 0xFFF) {
     GReg r1 = LoadGPR(e, s1, kScratch0);
-    e.asm_().SUB(rd, r1, (uint32_t)s2->constant.u64);
-    ZeroExtendSubword(e, rd, i->dest->type);
+    const uint32_t imm = static_cast<uint32_t>(MaskToType(s2->constant.u64, t));
+    if (t <= INT32_TYPE) {
+      e.asm_().SUBw(rd, r1, imm);
+      ZeroExtendSubword(e, rd, t);
+    } else {
+      e.asm_().SUB(rd, r1, imm);
+    }
   } else {
     GReg r1 = LoadGPR(e, s1, kScratch0);
     GReg r2 = LoadGPR(e, s2, kScratch1);
-    if (i->dest->type <= INT32_TYPE) {
+    if (t <= INT32_TYPE) {
       e.asm_().SUBw(rd, r1, r2);
-      ZeroExtendSubword(e, rd, i->dest->type);
+      ZeroExtendSubword(e, rd, t);
     } else {
       e.asm_().SUB(rd, r1, r2);
     }
@@ -2386,31 +2576,91 @@ static bool EmitNeg(A64Emitter& e, const Instr* i) {
   if (!i->dest || !IsAlloc(i->dest)) return true;
   GReg rd = GR(i->dest);
   GReg rs = LoadGPR(e, i->src1.value, kScratch0);
-  e.asm_().NEG(rd, rs);
+  if (i->dest->type <= INT32_TYPE) {
+    e.asm_().NEGw(rd, rs);
+    ZeroExtendSubword(e, rd, i->dest->type);
+  } else {
+    e.asm_().NEG(rd, rs);
+  }
   return true;
+}
+
+enum class FpUnary { Neg, Abs, Sqrt };
+
+// NEG/ABS/SQRT on FLOAT32, FLOAT64 and VEC128 (4 x f32).
+static bool EmitFpUnary(A64Emitter& e, const Instr* i, FpUnary op) {
+  if (!i->dest || !IsAlloc(i->dest)) return true;
+  auto src = i->src1.value;
+  if (!src) return true;
+  VReg vd = VR(i->dest);
+  if (op == FpUnary::Sqrt) {
+    SetFpMode(e, i->dest->type);
+  }
+  if (op == FpUnary::Neg && !VALUE_IS_CONSTANT(src) && src->def &&
+      (src->def->GetOpcodeNum() == OPCODE_MUL_ADD ||
+       src->def->GetOpcodeNum() == OPCODE_MUL_SUB)) {
+    // This is the negation half of fnmadd/fnmsub/vnmsubfp, which does not
+    // negate a NaN result (a plain fneg does).
+    VReg vs = VR(src);
+    switch (i->dest->type) {
+      case FLOAT32_TYPE:
+        e.asm_().FNEG_S(kVScratch3, vs);
+        e.asm_().FCMP_S(vs, vs);
+        e.asm_().FCSEL_S(vd, vs, kVScratch3, VS);
+        return true;
+      case FLOAT64_TYPE:
+        e.asm_().FNEG_D(kVScratch3, vs);
+        e.asm_().FCMP_D(vs, vs);
+        e.asm_().FCSEL_D(vd, vs, kVScratch3, VS);
+        return true;
+      case VEC128_TYPE:
+        e.asm_().FNEG_4S(kVScratch3, vs);
+        e.asm_().FCMEQ_4S(kVScratch4, vs, vs);  // not NaN
+        e.asm_().BSL_16B(kVScratch4, kVScratch3, vs);
+        e.asm_().MOV_16B(vd, kVScratch4);
+        return true;
+      default:
+        break;
+    }
+  }
+  switch (i->dest->type) {
+    case FLOAT32_TYPE: {
+      VReg vs = LoadFP(e, src, kVScratch0);
+      if (op == FpUnary::Neg) e.asm_().FNEG_S(vd, vs);
+      else if (op == FpUnary::Abs) e.asm_().FABS_S(vd, vs);
+      else e.asm_().FSQRT_S(vd, vs);
+      return true;
+    }
+    case FLOAT64_TYPE: {
+      VReg vs = LoadFP(e, src, kVScratch0);
+      if (op == FpUnary::Neg) e.asm_().FNEG_D(vd, vs);
+      else if (op == FpUnary::Abs) e.asm_().FABS_D(vd, vs);
+      else e.asm_().FSQRT_D(vd, vs);
+      return true;
+    }
+    case VEC128_TYPE: {
+      VReg vs = LoadVec128(e, src, kVScratch0);
+      if (op == FpUnary::Neg) e.asm_().FNEG_4S(vd, vs);
+      else if (op == FpUnary::Abs) e.asm_().FABS_4S(vd, vs);
+      else e.asm_().FSQRT_4S(vd, vs);
+      return true;
+    }
+    default:
+      return false;
+  }
 }
 
 static bool EmitAbs(A64Emitter& e, const Instr* i) {
   if (!i->dest || !IsAlloc(i->dest)) return true;
   auto src = i->src1.value;
   if (src->type >= FLOAT32_TYPE) {
-    if (src->type == FLOAT32_TYPE) {
-      VReg vs = IsAlloc(src) ? VR(src) : kVScratch0;
-      e.asm_().FABS_S(VR(i->dest), vs);
-    } else {
-      VReg vs = IsAlloc(src) ? VR(src) : kVScratch0;
-      e.asm_().FABS_D(VR(i->dest), vs);
-    }
-  } else {
-    GReg rd = GR(i->dest);
-    GReg rs = LoadGPR(e, src, kScratch0);
-    // abs x = (x XOR (x ASR 63)) - (x ASR 63)
-    e.asm_().ASRv(kScratch1, rs, kScratch2);  // Would need imm ASR
-    // Simpler: CMP, CNEG
-    e.asm_().CMP(rs, (uint32_t)0);
-    e.asm_().NEG(kScratch1, rs);
-    e.asm_().CSEL(rd, kScratch1, rs, MI);
+    return EmitFpUnary(e, i, FpUnary::Abs);
   }
+  GReg rd = GR(i->dest);
+  GReg rs = LoadGPR(e, src, kScratch0);
+  e.asm_().CMP(rs, (uint32_t)0);
+  e.asm_().NEG(kScratch1, rs);
+  e.asm_().CSEL(rd, kScratch1, rs, MI);
   return true;
 }
 
@@ -2476,7 +2726,12 @@ static bool EmitNot(A64Emitter& e, const Instr* i) {
   }
   GReg rd = GR(i->dest);
   GReg rs = LoadGPR(e, i->src1.value, kScratch0);
-  e.asm_().MVN(rd, rs);
+  if (i->dest->type <= INT32_TYPE) {
+    e.asm_().MVNw(rd, rs);
+    ZeroExtendSubword(e, rd, i->dest->type);
+  } else {
+    e.asm_().MVN(rd, rs);
+  }
   return true;
 }
 
@@ -2660,9 +2915,52 @@ static bool EmitRotateLeft(A64Emitter& e, const Instr* i) {
 static bool EmitCompare(A64Emitter& e, const Instr* i, Cond cc) {
   if (!i->dest || !IsAlloc(i->dest)) return true;
   GReg rd = GR(i->dest);
+  const TypeName t = i->src1.value->type;
+
+  if (t == FLOAT32_TYPE || t == FLOAT64_TYPE) {
+    e.ChangeFpcrMode(A64Emitter::FpcrMode::Fpu);
+    VReg v1 = LoadFP(e, i->src1.value, kVScratch0);
+    VReg v2 = LoadFP(e, i->src2.value, kVScratch1);
+    if (t == FLOAT32_TYPE) {
+      e.asm_().FCMP_S(v1, v2);
+    } else {
+      e.asm_().FCMP_D(v1, v2);
+    }
+    // Mirror the x64 backend's (u)comis + setcc results, which the PPC
+    // frontend is written against: an unordered compare reads as both
+    // "below" and "equal".
+    switch (cc) {
+      case EQ:
+        e.asm_().CSET(rd, EQ);
+        e.asm_().CSET(kScratch0, VS);
+        e.asm_().ORR(rd, rd, kScratch0);
+        break;
+      case NE:
+        e.asm_().CSET(rd, NE);
+        e.asm_().CSET(kScratch0, VC);
+        e.asm_().AND(rd, rd, kScratch0);
+        break;
+      case LT:
+      case LO:
+        e.asm_().CSET(rd, LT);  // less or unordered
+        break;
+      case LE:
+      case LS:
+        e.asm_().CSET(rd, LE);  // less, equal or unordered
+        break;
+      case GT:
+      case HI:
+        e.asm_().CSET(rd, GT);
+        break;
+      default:  // GE / HS
+        e.asm_().CSET(rd, GE);
+        break;
+    }
+    return true;
+  }
+
   GReg r1 = LoadGPR(e, i->src1.value, kScratch0);
   GReg r2 = LoadGPR(e, i->src2.value, kScratch1);
-  const TypeName t = i->src1.value->type;
   const bool is_signed = (cc == LT || cc == LE || cc == GT || cc == GE);
   if (t <= INT32_TYPE) {
     // Sub-word values are held zero-extended, so a 32-bit CMPw would treat a
@@ -2741,38 +3039,119 @@ static bool EmitSelect(A64Emitter& e, const Instr* i) {
   auto cond = i->src1.value;
   auto val_true = i->src2.value;
   auto val_false = i->src3.value;
+  const TypeName t = i->dest->type;
 
-  if (cond->type <= INT64_TYPE && val_true->type <= INT64_TYPE) {
+  if (t <= INT64_TYPE) {
     GReg rd = GR(i->dest);
     GReg rc = LoadGPR(e, cond, kScratch2);
     GReg rt = LoadGPR(e, val_true, kScratch0);
     GReg rf = LoadGPR(e, val_false, kScratch1);
     e.asm_().CMP(rc, (uint32_t)0);
     e.asm_().CSEL(rd, rt, rf, NE);
+    return true;
+  }
+
+  if (t == FLOAT32_TYPE || t == FLOAT64_TYPE) {
+    // Constants first: LoadFP clobbers kScratch0 but not the flags.
+    VReg vt = LoadFP(e, val_true, kVScratch0);
+    VReg vf = LoadFP(e, val_false, kVScratch1);
+    GReg rc = LoadGPR(e, cond, kScratch2);
+    e.asm_().CMP(rc, (uint32_t)0);
+    if (t == FLOAT32_TYPE) {
+      e.asm_().FCSEL_S(VR(i->dest), vt, vf, NE);
+    } else {
+      e.asm_().FCSEL_D(VR(i->dest), vt, vf, NE);
+    }
+    return true;
+  }
+
+  // VEC128
+  VReg vt = LoadVec128(e, val_true, kVScratch0);
+  VReg vf = LoadVec128(e, val_false, kVScratch1);
+  if (cond->type == VEC128_TYPE) {
+    // Bitwise select, same as x64: dest = (~mask & src2) | (mask & src3).
+    VReg vm = LoadVec128(e, cond, kVScratch2);
+    if (vm != kVScratch2) {
+      e.asm_().MOV_16B(kVScratch2, vm);
+    }
+    e.asm_().BSL_16B(kVScratch2, vf, vt);
+    e.asm_().MOV_16B(VR(i->dest), kVScratch2);
+    return true;
+  }
+  // Scalar condition choosing between whole vectors.
+  GReg rc = LoadGPR(e, cond, kScratch2);
+  a64::Label use_false, done;
+  e.asm_().CBZ(rc, &use_false);
+  e.asm_().MOV_16B(kVScratch2, vt);
+  e.asm_().B(&done);
+  e.asm_().Bind(&use_false);
+  e.asm_().MOV_16B(kVScratch2, vf);
+  e.asm_().Bind(&done);
+  e.asm_().MOV_16B(VR(i->dest), kVScratch2);
+  return true;
+}
+
+static bool EmitIntMinMax(A64Emitter& e, const Instr* i, bool is_max) {
+  GReg rd = GR(i->dest);
+  GReg r1 = LoadGPR(e, i->src1.value, kScratch0);
+  GReg r2 = LoadGPR(e, i->src2.value, kScratch1);
+  const TypeName t = i->dest->type;
+  // Signed comparison; sub-word values are held zero-extended.
+  if (t == INT8_TYPE) {
+    e.asm_().SXTB(kScratch2, r1);
+    e.asm_().SXTB(X12, r2);
+    e.asm_().CMPw(kScratch2, X12);
+  } else if (t == INT16_TYPE) {
+    e.asm_().SXTH(kScratch2, r1);
+    e.asm_().SXTH(X12, r2);
+    e.asm_().CMPw(kScratch2, X12);
+  } else if (t == INT32_TYPE) {
+    e.asm_().CMPw(r1, r2);
   } else {
-    e.asm_().NOP();  // Vector select — Phase 4
+    e.asm_().CMP(r1, r2);
+  }
+  e.asm_().CSEL(rd, r1, r2, is_max ? GT : LT);
+  return true;
+}
+
+static bool EmitMinMax(A64Emitter& e, const Instr* i, bool is_max) {
+  if (!i->dest || !IsAlloc(i->dest)) return true;
+  const TypeName t = i->dest->type;
+  if (t <= INT64_TYPE) {
+    return EmitIntMinMax(e, i, is_max);
+  }
+  VReg vd = VR(i->dest);
+  SetFpMode(e, t);
+  if (t == VEC128_TYPE) {
+    VReg v1 = LoadVec128(e, i->src1.value, kVScratch0);
+    VReg v2 = LoadVec128(e, i->src2.value, kVScratch1);
+    if (is_max) e.asm_().FMAX_4S(kVScratch3, v1, v2);
+    else e.asm_().FMIN_4S(kVScratch3, v1, v2);
+    {
+      const VReg ops[] = {v1, v2};
+      EmitVectorNaNFixup(e, kVScratch3, ops, 2);
+    }
+    e.asm_().MOV_16B(vd, kVScratch3);
+    return true;
+  }
+  VReg v1 = LoadFP(e, i->src1.value, kVScratch0);
+  VReg v2 = LoadFP(e, i->src2.value, kVScratch1);
+  if (t == FLOAT32_TYPE) {
+    if (is_max) e.asm_().FMAX_S(vd, v1, v2);
+    else e.asm_().FMIN_S(vd, v1, v2);
+  } else {
+    if (is_max) e.asm_().FMAX_D(vd, v1, v2);
+    else e.asm_().FMIN_D(vd, v1, v2);
   }
   return true;
 }
 
 static bool EmitMax(A64Emitter& e, const Instr* i) {
-  if (!i->dest || !IsAlloc(i->dest)) return true;
-  GReg rd = GR(i->dest);
-  GReg r1 = LoadGPR(e, i->src1.value, kScratch0);
-  GReg r2 = LoadGPR(e, i->src2.value, kScratch1);
-  e.asm_().CMP(r1, r2);
-  e.asm_().CSEL(rd, r1, r2, GT);
-  return true;
+  return EmitMinMax(e, i, true);
 }
 
 static bool EmitMin(A64Emitter& e, const Instr* i) {
-  if (!i->dest || !IsAlloc(i->dest)) return true;
-  GReg rd = GR(i->dest);
-  GReg r1 = LoadGPR(e, i->src1.value, kScratch0);
-  GReg r2 = LoadGPR(e, i->src2.value, kScratch1);
-  e.asm_().CMP(r1, r2);
-  e.asm_().CSEL(rd, r1, r2, LT);
-  return true;
+  return EmitMinMax(e, i, false);
 }
 
 static bool EmitAddCarry(A64Emitter& e, const Instr* i) {
@@ -2789,7 +3168,8 @@ static bool EmitAddCarry(A64Emitter& e, const Instr* i) {
   GReg carry_reg = kScratch2;
   if (carry_in) {
     if (VALUE_IS_CONSTANT(carry_in)) {
-      carry_imm = carry_in->constant.u64 ? 1u : 0u;
+      carry_imm = carry_in->IsConstantZero() ? 0u : 1u;
+      carry_in = nullptr;  // fully described by carry_imm
     } else {
       GReg carry_src = LoadGPR(e, carry_in, kScratch2);
       if (carry_in->type <= INT32_TYPE) {
@@ -2828,19 +3208,14 @@ static bool EmitAddCarry(A64Emitter& e, const Instr* i) {
 
 static bool EmitIsNan(A64Emitter& e, const Instr* i) {
   if (!i->dest || !IsAlloc(i->dest)) return true;
-  // Compare with self — NaN != NaN
   auto src = i->src1.value;
-  if (IsAlloc(src)) {
-    VReg vs = VR(src);
-    if (src->type == FLOAT32_TYPE) {
-      e.asm_().FCMP_S(vs, vs);  // Single-precision NaN check
-    } else {
-      e.asm_().FCMP_D(vs, vs);  // Double-precision NaN check
-    }
-    e.asm_().CSET(GR(i->dest), VS);  // VS = unordered (NaN)
+  VReg vs = LoadFP(e, src, kVScratch0);
+  if (src->type == FLOAT32_TYPE) {
+    e.asm_().FCMP_S(vs, vs);
   } else {
-    e.asm_().MOVZ(GR(i->dest), 0);
+    e.asm_().FCMP_D(vs, vs);
   }
+  e.asm_().CSET(GR(i->dest), VS);  // VS = unordered (NaN)
   return true;
 }
 
@@ -2849,45 +3224,134 @@ static bool EmitIsNan(A64Emitter& e, const Instr* i) {
 static bool EmitConvert(A64Emitter& e, const Instr* i) {
   if (!i->dest || !IsAlloc(i->dest)) return true;
   auto src = i->src1.value;
-  if (!src || !IsAlloc(src)) { e.asm_().NOP(); return true; }
+  if (!src) return true;
+  const TypeName st = src->type, dt = i->dest->type;
+  const bool src_fp = st == FLOAT32_TYPE || st == FLOAT64_TYPE;
+  const bool dst_fp = dt == FLOAT32_TYPE || dt == FLOAT64_TYPE;
+  e.ChangeFpcrMode(A64Emitter::FpcrMode::Fpu);
 
-  if (src->type == INT32_TYPE && i->dest->type == FLOAT32_TYPE) {
-    e.asm_().SCVTF_S(VR(i->dest), GR(src));
-  } else if (src->type == INT32_TYPE && i->dest->type == FLOAT64_TYPE) {
-    e.asm_().SCVTF_D(VR(i->dest), GR(src));
-  } else if (src->type == INT64_TYPE && i->dest->type == FLOAT64_TYPE) {
-    e.asm_().SCVTF_D(VR(i->dest), GR(src));
-  } else if (src->type == FLOAT32_TYPE && i->dest->type == INT32_TYPE) {
-    e.asm_().FCVTZS_S(GR(i->dest), VR(src));
-  } else if (src->type == FLOAT64_TYPE && i->dest->type == INT64_TYPE) {
-    e.asm_().FCVTZS(GR(i->dest), VR(src));
-  } else if (src->type == FLOAT32_TYPE && i->dest->type == FLOAT64_TYPE) {
-    e.asm_().FCVT_DS(VR(i->dest), VR(src));
-  } else if (src->type == FLOAT64_TYPE && i->dest->type == FLOAT32_TYPE) {
-    e.asm_().FCVT_SD(VR(i->dest), VR(src));
-  } else {
-    e.asm_().NOP();
+  if (src_fp && !dst_fp) {
+    // FP -> integer. FCVTZS saturates on overflow like the PPC fcti* family;
+    // NaN yields the most negative integer.
+    VReg vs = LoadFP(e, src, kVScratch0);
+    VReg rounded = vs;
+    if (i->flags != ROUND_TO_ZERO) {
+      // Honor the current (guest-selected) rounding mode.
+      if (st == FLOAT32_TYPE) e.asm_().FRINTX_S(kVScratch1, vs);
+      else e.asm_().FRINTX_D(kVScratch1, vs);
+      rounded = kVScratch1;
+    }
+    GReg rd = GR(i->dest);
+    const bool wide = dt == INT64_TYPE;
+    if (st == FLOAT32_TYPE) {
+      if (wide) e.asm_().FCVTZS_X_S(rd, rounded);
+      else e.asm_().FCVTZS_W_S(rd, rounded);
+      e.asm_().FCMP_S(vs, vs);
+    } else {
+      if (wide) e.asm_().FCVTZS_X_D(rd, rounded);
+      else e.asm_().FCVTZS_W_D(rd, rounded);
+      e.asm_().FCMP_D(vs, vs);
+    }
+    if (wide) {
+      e.asm_().MOVZ(kScratch0, 0x8000, 48);
+      e.asm_().CSEL(rd, kScratch0, rd, VS);
+    } else {
+      e.asm_().MOVZ(kScratch0, 0x8000, 16);
+      e.asm_().CSELw(rd, kScratch0, rd, VS);
+      ZeroExtendSubword(e, rd, dt);
+    }
+    return true;
+  }
+
+  if (!src_fp && dst_fp) {
+    // Integer -> FP (signed).
+    GReg rs = LoadGPR(e, src, kScratch0);
+    VReg vd = VR(i->dest);
+    if (st == INT64_TYPE) {
+      if (dt == FLOAT32_TYPE) e.asm_().SCVTF_S_X(vd, rs);
+      else e.asm_().SCVTF_D_X(vd, rs);
+    } else {
+      if (st == INT8_TYPE) {
+        e.asm_().SXTB(kScratch0, rs);
+        rs = kScratch0;
+      } else if (st == INT16_TYPE) {
+        e.asm_().SXTH(kScratch0, rs);
+        rs = kScratch0;
+      }
+      if (dt == FLOAT32_TYPE) e.asm_().SCVTF_S_W(vd, rs);
+      else e.asm_().SCVTF_D_W(vd, rs);
+    }
+    return true;
+  }
+
+  if (src_fp && dst_fp) {
+    VReg vs = LoadFP(e, src, kVScratch0);
+    if (st == FLOAT32_TYPE && dt == FLOAT64_TYPE) {
+      e.asm_().FCVT_DS(VR(i->dest), vs);
+    } else if (st == FLOAT64_TYPE && dt == FLOAT32_TYPE) {
+      e.asm_().FCVT_SD(VR(i->dest), vs);
+    } else if (st == FLOAT32_TYPE) {
+      e.asm_().FMOV_S(VR(i->dest), vs);
+    } else {
+      e.asm_().FMOV_D(VR(i->dest), vs);
+    }
+    return true;
+  }
+  return false;
+}
+
+static bool EmitSqrt(A64Emitter& e, const Instr* i) {
+  return EmitFpUnary(e, i, FpUnary::Sqrt);
+}
+
+// MEMSET backs dcbz/dcbz128: fill a (constant-length) block with a byte.
+static bool EmitMemset(A64Emitter& e, const Instr* i) {
+  auto addr = i->src1.value;
+  auto value = i->src2.value;
+  auto length = i->src3.value;
+  if (!addr || !value || !length || !VALUE_IS_CONSTANT(length)) {
+    return false;
+  }
+  const uint64_t len = length->constant.u64;
+  GReg host_addr = ComputeHostAddress(e, addr, nullptr, kScratch0, kScratch1);
+  GReg fill = XZR;
+  if (!VALUE_IS_CONSTANT(value)) {
+    e.asm_().UXTB(kScratch1, GR(value));
+    e.MovImm64(kScratch2, 0x0101010101010101ull);
+    e.asm_().MUL(kScratch1, kScratch1, kScratch2);
+    fill = kScratch1;
+  } else if (value->constant.u8 != 0) {
+    e.MovImm64(kScratch1, 0x0101010101010101ull * value->constant.u8);
+    fill = kScratch1;
+  }
+  uint64_t offset = 0;
+  for (; offset + 16 <= len; offset += 16) {
+    if (offset && (offset % 496) == 0) {
+      e.asm_().ADD(host_addr, host_addr, 496u);
+    }
+    e.asm_().STP(fill, fill, host_addr, static_cast<int32_t>(offset % 496));
+  }
+  for (; offset < len; ++offset) {
+    e.asm_().STRB(fill, host_addr, static_cast<int32_t>(offset % 496));
   }
   return true;
 }
 
-static bool EmitSqrt(A64Emitter& e, const Instr* i) {
-  if (!i->dest || !IsAlloc(i->dest)) return true;
-  auto src = i->src1.value;
-  if (!src || !IsAlloc(src)) { e.asm_().NOP(); return true; }
-  if (src->type == FLOAT32_TYPE) e.asm_().FSQRT_S(VR(i->dest), VR(src));
-  else e.asm_().FSQRT_D(VR(i->dest), VR(src));
-  return true;
-}
-
-static bool EmitMemset(A64Emitter& e, const Instr* i) {
-  e.asm_().NOP();
-  return true;
+extern "C" uint64_t A64LoadClock(void* raw_context, uint64_t unused0,
+                                 uint64_t unused1) {
+  return Clock::QueryGuestTickCount();
 }
 
 static bool EmitLoadClock(A64Emitter& e, const Instr* i) {
   if (!i->dest || !IsAlloc(i->dest)) return true;
-  e.asm_().NOP();
+  e.MovImm64(X0, reinterpret_cast<uint64_t>(&A64LoadClock));
+  e.MovImm64(X1, 0);
+  e.MovImm64(X2, 0);
+  auto backend = static_cast<A64Backend*>(e.backend());
+  e.MovImm64(kScratch0,
+             reinterpret_cast<uint64_t>(backend->guest_to_host_thunk()));
+  e.asm_().BLR(kScratch0);
+  e.asm_().MOV(GR(i->dest), X0);
   return true;
 }
 
@@ -2896,27 +3360,35 @@ static bool EmitLoadClock(A64Emitter& e, const Instr* i) {
 static bool EmitRound(A64Emitter& e, const Instr* i) {
   if (!i->dest || !IsAlloc(i->dest)) return true;
   auto src = i->src1.value;
-  if (!src || !IsAlloc(src)) { e.asm_().NOP(); return true; }
+  if (!src) return true;
 
   VReg vd = VR(i->dest);
-  VReg vs = VR(src);
-  // Round mode is encoded in flags
-  uint32_t mode = i->flags;
+  const uint32_t mode = i->flags;
+  SetFpMode(e, src->type);
+  if (src->type == VEC128_TYPE) {
+    VReg vs = LoadVec128(e, src, kVScratch0);
+    switch (mode) {
+      case ROUND_TO_ZERO:              e.asm_().FRINTZ_4S(vd, vs); break;
+      case ROUND_TO_MINUS_INFINITY:    e.asm_().FRINTM_4S(vd, vs); break;
+      case ROUND_TO_POSITIVE_INFINITY: e.asm_().FRINTP_4S(vd, vs); break;
+      default:                         e.asm_().FRINTN_4S(vd, vs); break;
+    }
+    return true;
+  }
+  VReg vs = LoadFP(e, src, kVScratch0);
   if (src->type == FLOAT32_TYPE) {
     switch (mode) {
-      case ROUND_TO_ZERO:         e.asm_().FRINTZ_S(vd, vs); break;
-      case ROUND_TO_NEAREST:      e.asm_().FRINTN_S(vd, vs); break;
-      case ROUND_TO_MINUS_INFINITY: e.asm_().FRINTM_S(vd, vs); break;
+      case ROUND_TO_ZERO:              e.asm_().FRINTZ_S(vd, vs); break;
+      case ROUND_TO_MINUS_INFINITY:    e.asm_().FRINTM_S(vd, vs); break;
       case ROUND_TO_POSITIVE_INFINITY: e.asm_().FRINTP_S(vd, vs); break;
-      default: e.asm_().FRINTN_S(vd, vs); break;
+      default:                         e.asm_().FRINTN_S(vd, vs); break;
     }
   } else {
     switch (mode) {
-      case ROUND_TO_ZERO:         e.asm_().FRINTZ_D(vd, vs); break;
-      case ROUND_TO_NEAREST:      e.asm_().FRINTN_D(vd, vs); break;
-      case ROUND_TO_MINUS_INFINITY: e.asm_().FRINTM_D(vd, vs); break;
+      case ROUND_TO_ZERO:              e.asm_().FRINTZ_D(vd, vs); break;
+      case ROUND_TO_MINUS_INFINITY:    e.asm_().FRINTM_D(vd, vs); break;
       case ROUND_TO_POSITIVE_INFINITY: e.asm_().FRINTP_D(vd, vs); break;
-      default: e.asm_().FRINTN_D(vd, vs); break;
+      default:                         e.asm_().FRINTN_D(vd, vs); break;
     }
   }
   return true;
@@ -2925,96 +3397,336 @@ static bool EmitRound(A64Emitter& e, const Instr* i) {
 static bool EmitToSingle(A64Emitter& e, const Instr* i) {
   if (!i->dest || !IsAlloc(i->dest)) return true;
   auto src = i->src1.value;
-  if (!src || !IsAlloc(src)) { e.asm_().NOP(); return true; }
-  // Double → Single with rounding
-  e.asm_().FCVT_SD(VR(i->dest), VR(src));
+  if (!src) return true;
+  // F64 -> F64 holding the value rounded to single precision (frsp et al).
+  e.ChangeFpcrMode(A64Emitter::FpcrMode::Fpu);
+  VReg vs = LoadFP(e, src, kVScratch0);
+  e.asm_().FCVT_SD(kVScratch1, vs);
+  e.asm_().FCVT_DS(VR(i->dest), kVScratch1);
   return true;
+}
+
+// 1.0 in the lane layout matching `type`, into `vd` (clobbers kScratch0).
+static void EmitLoadFpOne(A64Emitter& e, VReg vd, TypeName type) {
+  if (type == VEC128_TYPE) {
+    e.asm_().FMOV_4S_one(vd);
+  } else if (type == FLOAT32_TYPE) {
+    e.MovImm64(kScratch0, 0x3F800000u);
+    e.asm_().FMOV_SW(vd, kScratch0);
+  } else {
+    e.MovImm64(kScratch0, 0x3FF0000000000000ull);
+    e.asm_().FMOV_DX(vd, kScratch0);
+  }
+}
+
+static bool EmitVec128UnaryViaHelper(A64Emitter& e, const Instr* i,
+                                     const Value* src, uint64_t helper_address,
+                                     uint64_t arg0);
+
+// frsqrte: the console's table-driven estimate (5 bits of mantissa), ported
+// from the x64 backend's frsqrtefp helper.
+static uint64_t A64FrsqrteEstimate(uint64_t a) {
+  static const uint8_t kTable[16] = {241, 216, 192, 168, 152, 136, 128, 112,
+                                     96,  76,  60,  48,  32,  24,  16,  8};
+  const uint64_t kExpMask = 0x7FF0000000000000ull;
+  if ((a << 1) == 0) {
+    return (a & 0x8000000000000000ull) | kExpMask;  // +-0 -> +-inf
+  }
+  if ((a & kExpMask) == kExpMask) {
+    if (a == kExpMask) return 0;                       // +inf -> +0
+    if (a << 12) return a | 0x7FF8000000000000ull;     // NaN, quieted
+    return 0x7FF8000000000000ull;                      // -inf
+  }
+  if (a >> 63) {
+    return 0x7FF8000000000000ull;  // negative
+  }
+  uint32_t exp = static_cast<uint32_t>(a >> 52) & 2047;
+  uint64_t mant = a & 0xFFFFFFFFFFFFFull;
+  if (mant && !exp) {
+    const uint32_t lz = static_cast<uint32_t>(xe::lzcnt(mant));
+    mant <<= (lz - 11);
+    exp = 12 - lz;
+  }
+  const uint32_t index =
+      ((static_cast<uint32_t>(mant >> 49) & 7) | ((exp * 8) & 8)) ^ 8;
+  const uint32_t out_exp = 1022 - ((exp - 1023) >> 1);
+  return (uint64_t(kTable[index]) << 44) | (uint64_t(out_exp) << 52);
+}
+
+// vrsqrtefp: per-lane estimate with linear interpolation, ported from the
+// x64 backend's vrsqrtefp helper. `njm` = non-Java mode (denormals as zero).
+static uint32_t A64VrsqrteEstimate(uint32_t x, bool njm) {
+  static const uint32_t kTable[32] = {
+      0x568B4FD, 0x4F3AF97, 0x48DAAA5, 0x435A618, 0x3E7A1E4, 0x3A29DFE,
+      0x3659A5C, 0x32E96F8, 0x2FC93CA, 0x2D090CE, 0x2A88DFE, 0x2838B57,
+      0x26188D4, 0x2438673, 0x2268431, 0x20B820B, 0x3D27FFA, 0x3807C29,
+      0x33878AA, 0x2F97572, 0x2C27279, 0x2926FB7, 0x2666D26, 0x23F6AC0,
+      0x21D6881, 0x1FD6665, 0x1E16468, 0x1C76287, 0x1AF60C1, 0x1995F12,
+      0x1855D79, 0x1735BF4};
+  const uint32_t kQNaN = 0x7FC00000u;
+  const bool negative = (x >> 31) != 0;
+  const uint32_t signed_inf = negative ? 0xFF800000u : 0x7F800000u;
+  uint32_t mant = x & 0x7FFFFF;
+  uint32_t biased = (x >> 23) & 0xFF;
+  int32_t exp = static_cast<int32_t>(biased) - 127;
+  const bool is_nan = biased == 255 && mant != 0;
+
+  if (x == 0xFF800000u) return kQNaN;
+  if (biased == 0 && mant != 0) {
+    // Denormal input.
+    if (njm) return signed_inf;
+    if ((x & 0x7FFFFFFFu) == 0x400000u) {
+      return negative ? kQNaN : 0x5F34FD00u;
+    }
+    const uint32_t lz = static_cast<uint32_t>(xe::lzcnt(mant));
+    biased = 9 - lz;  // may wrap; only used modulo 2^32 below, as on x64
+    exp = -118 - static_cast<int32_t>(lz);
+    mant = (x << ((lz - 8) & 31)) & 0x7FFFFE;
+  } else if (biased == 255) {
+    exp = 128;
+    if (!negative && !is_nan) {
+      return 0;  // +inf -> +0
+    }
+  }
+  if (exp == 128 && negative && !is_nan) {
+    return mant ? (x | 0x400000u) : kQNaN;
+  }
+  if (mant != 0) {
+    if (exp == 128) return x | 0x400000u;  // NaN, quieted
+  } else if (biased == 0) {
+    return signed_inf;  // +-0 -> +-inf
+  }
+  if (negative && !is_nan) {
+    return kQNaN;
+  }
+  int32_t out_exp = static_cast<int32_t>(127u - biased) >> 1;
+  uint32_t index = ((static_cast<uint32_t>(exp) << 4) & 16) | (mant >> 19);
+  index ^= 16;
+  const uint32_t entry = kTable[index & 31];
+  uint32_t value =
+      ((entry << 10) & 0x3FFFC00u) - (((mant >> 9) & 1023) * (entry >> 16));
+  if (!(value & (1u << 25))) {
+    const uint32_t lz = static_cast<uint32_t>(xe::lzcnt(value & 0x1FFFFFFu));
+    out_exp += 6 - static_cast<int32_t>(lz);
+    value <<= ((lz - 6) & 31);
+  }
+  if ((value & 5) && (value & 2)) {
+    value += 4;
+  }
+  uint32_t result = (static_cast<uint32_t>(out_exp) << 23) + 0x3F800000u;
+  result |= (x & 0x80000000u) | ((value >> 2) & 0x7FFFFF);
+  if (njm && !(result & 0x7F800000u)) {
+    result &= 0x80000000u;  // denormal results flush to zero
+  }
+  return result;
+}
+
+// arg0: 1 = f64 in lane 0 (frsqrte), otherwise four f32 lanes (vrsqrtefp).
+extern "C" uint64_t A64RsqrtEstimate(void* raw_context, uint64_t shape,
+                                     uint64_t unused) {
+  auto* backend_context = A64GetBackendContext(raw_context);
+  auto* value = reinterpret_cast<vec128_t*>(backend_context->helper_scratch);
+  if (shape == 1) {
+    const uint64_t a = value->u64[0];
+    value->u64[0] = A64FrsqrteEstimate(a);
+#if defined(__aarch64__)
+    // Report the estimate's exceptions the way an inline operation would:
+    // zero divide for +-0, invalid for negative operands and signalling NaNs.
+    const bool is_nan = (a << 1) > 0xFFE0000000000000ull;
+    uint64_t fpsr = 0;
+    if ((a << 1) == 0) {
+      fpsr = FP_STATUS_DIVIDE_BY_ZERO;
+    } else if (is_nan ? !(a & 0x0008000000000000ull) : (a >> 63) != 0) {
+      fpsr = FP_STATUS_INVALID;
+    }
+    __asm__ volatile("msr fpsr, %0" : : "r"(fpsr));
+#endif
+  } else {
+    const bool njm = (backend_context->fpcr_vmx & kA64FpcrFlushToZero) != 0;
+    for (int n = 0; n < 4; ++n) {
+      value->u32[n] = A64VrsqrteEstimate(value->u32[n], njm);
+    }
+  }
+  return 0;
 }
 
 static bool EmitRsqrt(A64Emitter& e, const Instr* i) {
   if (!i->dest || !IsAlloc(i->dest)) return true;
   auto src = i->src1.value;
-  if (!src || !IsAlloc(src)) { e.asm_().NOP(); return true; }
-  if (src->type == FLOAT32_TYPE) {
-    e.asm_().FRSQRTE_S(VR(i->dest), VR(src));
-  } else {
-    e.asm_().FRSQRTE_D(VR(i->dest), VR(src));
+  if (!src) return true;
+  return EmitVec128UnaryViaHelper(
+      e, i, src, reinterpret_cast<uint64_t>(&A64RsqrtEstimate),
+      i->dest->type == FLOAT64_TYPE ? 1 : 2);
+}
+
+// vrefp: the console's table-driven reciprocal estimate. The mantissa comes
+// from a 32-entry (base, slope) table indexed by the top five mantissa bits,
+// interpolated on the next nine. Derived from (and matching) the generated
+// vrefp hardware captures in src/xenia/cpu/ppc/testing.
+static uint32_t A64VrefpEstimate(uint32_t x, bool njm) {
+  static const struct {
+    uint32_t base;
+    uint32_t slope;
+  } kTable[32] = {
+      {0x7FF800, 0x3E1}, {0x783800, 0x3A7}, {0x70EA00, 0x371}, {0x6A0800, 0x340},
+      {0x638800, 0x313}, {0x5D6200, 0x2EA}, {0x579000, 0x2C4}, {0x520800, 0x2A0},
+      {0x4CC800, 0x27F}, {0x47CA00, 0x261}, {0x430800, 0x245}, {0x3E8000, 0x22A},
+      {0x3A2C00, 0x212}, {0x360800, 0x1FB}, {0x321400, 0x1E5}, {0x2E4A00, 0x1D1},
+      {0x2AA800, 0x1BE}, {0x272C00, 0x1AC}, {0x23D600, 0x19B}, {0x209E00, 0x18B},
+      {0x1D8800, 0x17C}, {0x1A9000, 0x16E}, {0x17AE00, 0x15B}, {0x14F800, 0x15B},
+      {0x124400, 0x143}, {0x0FBE00, 0x143}, {0x0D3800, 0x12D}, {0x0ADE00, 0x12D},
+      {0x088400, 0x11A}, {0x065000, 0x11A}, {0x041C00, 0x108}, {0x020C00, 0x106}};
+  const uint32_t sign = x & 0x80000000u;
+  int32_t exp = static_cast<int32_t>((x >> 23) & 0xFF);
+  uint32_t mant = x & 0x7FFFFF;
+  if (exp == 255) {
+    return mant ? (x | 0x400000u) : sign;  // NaN quieted; +-inf -> +-0
   }
-  return true;
+  if (exp == 0) {
+    if (!mant || njm) {
+      return sign | 0x7F800000u;  // +-0 (or a flushed denormal) -> +-inf
+    }
+    while (!(mant & 0x800000u)) {
+      mant <<= 1;
+      --exp;
+    }
+    ++exp;
+    mant &= 0x7FFFFF;
+  }
+  const auto& entry = kTable[mant >> 18];
+  const uint32_t out_mant = entry.base - entry.slope * (((mant >> 8) & 0x3FF) >> 1);
+  const int32_t out_exp = 253 - exp;
+  if (out_exp >= 255) {
+    return sign | 0x7F800000u;
+  }
+  if (out_exp <= 0) {
+    if (njm) return sign;  // denormal results flush to zero
+    return sign | ((0x800000u | out_mant) >> (1 - out_exp));
+  }
+  return sign | (static_cast<uint32_t>(out_exp) << 23) | out_mant;
+}
+
+extern "C" uint64_t A64VrefpEstimateHelper(void* raw_context, uint64_t unused0,
+                                           uint64_t unused1) {
+  auto* backend_context = A64GetBackendContext(raw_context);
+  auto* value = reinterpret_cast<vec128_t*>(backend_context->helper_scratch);
+  const bool njm = (backend_context->fpcr_vmx & kA64FpcrFlushToZero) != 0;
+  for (int n = 0; n < 4; ++n) {
+    value->u32[n] = A64VrefpEstimate(value->u32[n], njm);
+  }
+  return 0;
 }
 
 static bool EmitRecip(A64Emitter& e, const Instr* i) {
   if (!i->dest || !IsAlloc(i->dest)) return true;
   auto src = i->src1.value;
-  if (!src || !IsAlloc(src)) { e.asm_().NOP(); return true; }
-  if (src->type == FLOAT32_TYPE) {
-    e.asm_().FRECPE_S(VR(i->dest), VR(src));
+  if (!src) return true;
+  const TypeName t = i->dest->type;
+  VReg vd = VR(i->dest);
+  SetFpMode(e, t);
+  if (t == VEC128_TYPE) {
+    return EmitVec128UnaryViaHelper(
+        e, i, src, reinterpret_cast<uint64_t>(&A64VrefpEstimateHelper), 0);
+  }
+  VReg vs = LoadFP(e, src, kVScratch2);
+  EmitLoadFpOne(e, kVScratch0, t);
+  if (t == FLOAT32_TYPE) {
+    e.asm_().FDIV_S(vd, kVScratch0, vs);
   } else {
-    e.asm_().FRECPE_D(VR(i->dest), VR(src));
+    e.asm_().FDIV_D(vd, kVScratch0, vs);
   }
   return true;
 }
 
-static bool EmitFAdd(A64Emitter& e, const Instr* i) {
+enum class FpBinary { Add, Sub, Mul, Div };
+
+// ADD/SUB/MUL/DIV on FLOAT32, FLOAT64 and VEC128 (4 x f32).
+static bool EmitFpBinary(A64Emitter& e, const Instr* i, FpBinary op) {
   if (!i->dest || !IsAlloc(i->dest)) return true;
   auto s1 = i->src1.value, s2 = i->src2.value;
-  if (!IsAlloc(s1) || !IsAlloc(s2)) { e.asm_().NOP(); return true; }
-  if (i->dest->type == FLOAT32_TYPE)
-    e.asm_().FADD_S(VR(i->dest), VR(s1), VR(s2));
-  else
-    e.asm_().FADD_D(VR(i->dest), VR(s1), VR(s2));
-  return true;
+  if (!s1 || !s2) return true;
+  VReg vd = VR(i->dest);
+  SetFpMode(e, i->dest->type);
+  switch (i->dest->type) {
+    case FLOAT32_TYPE: {
+      VReg v1 = LoadFP(e, s1, kVScratch0);
+      VReg v2 = LoadFP(e, s2, kVScratch1);
+      switch (op) {
+        case FpBinary::Add: e.asm_().FADD_S(kVScratch3, v1, v2); break;
+        case FpBinary::Sub: e.asm_().FSUB_S(kVScratch3, v1, v2); break;
+        case FpBinary::Mul: e.asm_().FMUL_S(kVScratch3, v1, v2); break;
+        case FpBinary::Div: e.asm_().FDIV_S(kVScratch3, v1, v2); break;
+      }
+      {
+        const VReg ops[] = {v1, v2};
+        EmitScalarNaNFixup(e, kVScratch3, ops, 2, true);
+      }
+      e.asm_().FMOV_S(vd, kVScratch3);
+      return true;
+    }
+    case FLOAT64_TYPE: {
+      VReg v1 = LoadFP(e, s1, kVScratch0);
+      VReg v2 = LoadFP(e, s2, kVScratch1);
+      switch (op) {
+        case FpBinary::Add: e.asm_().FADD_D(kVScratch3, v1, v2); break;
+        case FpBinary::Sub: e.asm_().FSUB_D(kVScratch3, v1, v2); break;
+        case FpBinary::Mul: e.asm_().FMUL_D(kVScratch3, v1, v2); break;
+        case FpBinary::Div: e.asm_().FDIV_D(kVScratch3, v1, v2); break;
+      }
+      {
+        const VReg ops[] = {v1, v2};
+        EmitScalarNaNFixup(e, kVScratch3, ops, 2, false);
+      }
+      e.asm_().FMOV_D(vd, kVScratch3);
+      return true;
+    }
+    case VEC128_TYPE: {
+      VReg v1 = LoadVec128(e, s1, kVScratch0);
+      VReg v2 = LoadVec128(e, s2, kVScratch1);
+      switch (op) {
+        case FpBinary::Add: e.asm_().FADD_4S(kVScratch3, v1, v2); break;
+        case FpBinary::Sub: e.asm_().FSUB_4S(kVScratch3, v1, v2); break;
+        case FpBinary::Mul: e.asm_().FMUL_4S(kVScratch3, v1, v2); break;
+        case FpBinary::Div: e.asm_().FDIV_4S(kVScratch3, v1, v2); break;
+      }
+      {
+        const VReg ops[] = {v1, v2};
+        EmitVectorNaNFixup(e, kVScratch3, ops, 2);
+      }
+      e.asm_().MOV_16B(vd, kVScratch3);
+      return true;
+    }
+    default:
+      return false;
+  }
+}
+
+static bool EmitFAdd(A64Emitter& e, const Instr* i) {
+  return EmitFpBinary(e, i, FpBinary::Add);
 }
 
 static bool EmitFSub(A64Emitter& e, const Instr* i) {
-  if (!i->dest || !IsAlloc(i->dest)) return true;
-  auto s1 = i->src1.value, s2 = i->src2.value;
-  if (!IsAlloc(s1) || !IsAlloc(s2)) { e.asm_().NOP(); return true; }
-  if (i->dest->type == FLOAT32_TYPE)
-    e.asm_().FSUB_S(VR(i->dest), VR(s1), VR(s2));
-  else
-    e.asm_().FSUB_D(VR(i->dest), VR(s1), VR(s2));
-  return true;
+  return EmitFpBinary(e, i, FpBinary::Sub);
 }
 
 static bool EmitFMul(A64Emitter& e, const Instr* i) {
-  if (!i->dest || !IsAlloc(i->dest)) return true;
-  auto s1 = i->src1.value, s2 = i->src2.value;
-  if (!IsAlloc(s1) || !IsAlloc(s2)) { e.asm_().NOP(); return true; }
-  if (i->dest->type == FLOAT32_TYPE)
-    e.asm_().FMUL_S(VR(i->dest), VR(s1), VR(s2));
-  else
-    e.asm_().FMUL_D(VR(i->dest), VR(s1), VR(s2));
-  return true;
+  return EmitFpBinary(e, i, FpBinary::Mul);
 }
 
 static bool EmitFDiv(A64Emitter& e, const Instr* i) {
-  if (!i->dest || !IsAlloc(i->dest)) return true;
-  auto s1 = i->src1.value, s2 = i->src2.value;
-  if (!IsAlloc(s1) || !IsAlloc(s2)) { e.asm_().NOP(); return true; }
-  if (i->dest->type == FLOAT32_TYPE)
-    e.asm_().FDIV_S(VR(i->dest), VR(s1), VR(s2));
-  else
-    e.asm_().FDIV_D(VR(i->dest), VR(s1), VR(s2));
-  return true;
+  return EmitFpBinary(e, i, FpBinary::Div);
 }
 
 static bool EmitFNeg(A64Emitter& e, const Instr* i) {
-  if (!i->dest || !IsAlloc(i->dest)) return true;
-  auto src = i->src1.value;
-  if (!src || !IsAlloc(src)) { e.asm_().NOP(); return true; }
-  if (src->type == FLOAT32_TYPE)
-    e.asm_().FNEG_S(VR(i->dest), VR(src));
-  else
-    e.asm_().FNEG_D(VR(i->dest), VR(src));
-  return true;
+  return EmitFpUnary(e, i, FpUnary::Neg);
 }
 
 static bool EmitSetRoundingMode(A64Emitter& e, const Instr* i) {
   // src1 = PPC FPSCR[RN]: 0=nearest, 1=toward zero, 2=+inf, 3=-inf.
   // ARM FPCR RMode (bits [23:22]): 0=nearest, 1=+inf, 2=-inf, 3=zero.
   // The mapping (0->0, 1->3, 2->1, 3->2) is packed into 0x9C, two bits per
-  // guest mode.
+  // guest mode. The result becomes the scalar-FPU FPCR image and is made
+  // current (leaving VMX mode if it was active).
   auto src = i->src1.value;
   if (!src) return true;
   GReg mode = LoadGPR(e, src, kScratch0);
@@ -3024,52 +3736,93 @@ static bool EmitSetRoundingMode(A64Emitter& e, const Instr* i) {
   e.asm_().MOVZ(kScratch0, 0x9C);                 // mode no longer needed
   e.asm_().LSRv(kScratch0, kScratch0, kScratch1); // table >> (g*2)
   e.asm_().ANDw(kScratch0, kScratch0, kScratch2); // ARM RMode
-  e.asm_().LSL_imm(kScratch0, kScratch0, 22);
-  e.asm_().MRS_FPCR(kScratch1);
-  e.MovImm64(kScratch2, ~(3ULL << 22));
-  e.asm_().AND(kScratch1, kScratch1, kScratch2);
-  e.asm_().ORR(kScratch1, kScratch1, kScratch0);
-  e.asm_().MSR_FPCR(kScratch1);
+  e.asm_().LSL_imm(kScratch0, kScratch0, kA64FpcrRModeShift);
+  e.asm_().SUB(kScratch1, kContextReg,
+               static_cast<uint32_t>(sizeof(A64BackendContext)));
+  e.asm_().STRw(kScratch0, kScratch1, offsetof(A64BackendContext, fpcr_fpu));
+  e.asm_().LDRw(kScratch2, kScratch1, offsetof(A64BackendContext, flags));
+  e.asm_().MOVZ(X12, 1u << kA64BackendVmxModeBit);
+  e.asm_().BIC(kScratch2, kScratch2, X12);
+  e.asm_().STRw(kScratch2, kScratch1, offsetof(A64BackendContext, flags));
+  e.asm_().MSR_FPCR(kScratch0);
+  e.AssumeFpcrMode(A64Emitter::FpcrMode::Fpu);
+  return true;
+}
+
+// MUL_ADD: dest = (src1 * src2) + src3.  MUL_SUB: dest = (src1 * src2) - src3.
+// SET_NJM: non-Java mode on => VMX float math flushes denormals (FPCR.FZ).
+// Updates the VMX FPCR image and drops back to the FPU environment so the
+// next VMX operation reloads it.
+static bool EmitSetNJM(A64Emitter& e, const Instr* i) {
+  auto src = i->src1.value;
+  if (!src) return true;
+  GReg on = LoadGPR(e, src, kScratch0);
+  e.asm_().CMP(on, (uint32_t)0);
+  e.MovImm64(kScratch1, kA64FpcrFlushToZero);
+  e.asm_().CSEL(kScratch0, kScratch1, XZR, NE);
+  e.asm_().SUB(kScratch1, kContextReg,
+               static_cast<uint32_t>(sizeof(A64BackendContext)));
+  e.asm_().STRw(kScratch0, kScratch1, offsetof(A64BackendContext, fpcr_vmx));
+  e.asm_().LDRw(kScratch2, kScratch1, offsetof(A64BackendContext, flags));
+  e.asm_().MOVZ(X12, 1u << kA64BackendVmxModeBit);
+  e.asm_().BIC(kScratch2, kScratch2, X12);
+  e.asm_().STRw(kScratch2, kScratch1, offsetof(A64BackendContext, flags));
+  e.asm_().LDRw(kScratch0, kScratch1, offsetof(A64BackendContext, fpcr_fpu));
+  e.asm_().MSR_FPCR(kScratch0);
+  e.AssumeFpcrMode(A64Emitter::FpcrMode::Fpu);
+  return true;
+}
+
+static bool EmitMulAddSub(A64Emitter& e, const Instr* i, bool is_sub) {
+  if (!i->dest || !IsAlloc(i->dest)) return true;
+  auto s1 = i->src1.value, s2 = i->src2.value, s3 = i->src3.value;
+  if (!s1 || !s2 || !s3) return true;
+  VReg vd = VR(i->dest);
+  const TypeName t = i->dest->type;
+  SetFpMode(e, t);
+  if (t == VEC128_TYPE) {
+    VReg v1 = LoadVec128(e, s1, kVScratch0);
+    VReg v2 = LoadVec128(e, s2, kVScratch1);
+    VReg v3 = LoadVec128(e, s3, kVScratch2);
+    // Accumulate in a scratch so dest may alias any source.
+    if (is_sub) {
+      e.asm_().FNEG_4S(kVScratch3, v3);
+    } else {
+      e.asm_().MOV_16B(kVScratch3, v3);
+    }
+    e.asm_().FMLA_4S(kVScratch3, v1, v2);
+    {
+      // HIR operands are (frA, frC, frB); NaN priority is frA, frB, frC.
+      const VReg ops[] = {v1, v3, v2};
+      EmitVectorNaNFixup(e, kVScratch3, ops, 3);
+    }
+    e.asm_().MOV_16B(vd, kVScratch3);
+    return true;
+  }
+  VReg v1 = LoadFP(e, s1, kVScratch0);
+  VReg v2 = LoadFP(e, s2, kVScratch1);
+  VReg v3 = LoadFP(e, s3, kVScratch2);
+  const VReg ops[] = {v1, v3, v2};  // NaN priority: frA, frB, frC
+  if (t == FLOAT32_TYPE) {
+    if (is_sub) e.asm_().FNMSUB_S(kVScratch3, v1, v2, v3);
+    else e.asm_().FMADD_S(kVScratch3, v1, v2, v3);
+    EmitScalarNaNFixup(e, kVScratch3, ops, 3, true);
+    e.asm_().FMOV_S(vd, kVScratch3);
+  } else {
+    if (is_sub) e.asm_().FNMSUB_D(kVScratch3, v1, v2, v3);
+    else e.asm_().FMADD_D(kVScratch3, v1, v2, v3);
+    EmitScalarNaNFixup(e, kVScratch3, ops, 3, false);
+    e.asm_().FMOV_D(vd, kVScratch3);
+  }
   return true;
 }
 
 static bool EmitMulAdd(A64Emitter& e, const Instr* i) {
-  if (!i->dest || !IsAlloc(i->dest)) return true;
-  auto s1 = i->src1.value, s2 = i->src2.value, s3 = i->src3.value;
-  if (!IsAlloc(s1) || !IsAlloc(s2) || !IsAlloc(s3)) {
-    e.asm_().NOP();
-    return true;
-  }
-  // dest = s1 + (s2 * s3)
-  if (i->dest->type == FLOAT32_TYPE) {
-    e.asm_().FMADD_S(VR(i->dest), VR(s2), VR(s3), VR(s1));
-  } else if (i->dest->type == FLOAT64_TYPE) {
-    e.asm_().FMADD_D(VR(i->dest), VR(s2), VR(s3), VR(s1));
-  } else if (i->dest->type == VEC128_TYPE) {
-    // Vector FMA: FMLA Vd, Vn, Vm
-    e.asm_().MOV_16B(VR(i->dest), VR(s1));
-    e.asm_().FMLA_4S(VR(i->dest), VR(s2), VR(s3));
-  }
-  return true;
+  return EmitMulAddSub(e, i, false);
 }
 
 static bool EmitMulSub(A64Emitter& e, const Instr* i) {
-  if (!i->dest || !IsAlloc(i->dest)) return true;
-  auto s1 = i->src1.value, s2 = i->src2.value, s3 = i->src3.value;
-  if (!IsAlloc(s1) || !IsAlloc(s2) || !IsAlloc(s3)) {
-    e.asm_().NOP();
-    return true;
-  }
-  // dest = s1 - (s2 * s3)
-  if (i->dest->type == FLOAT32_TYPE) {
-    e.asm_().FMSUB_S(VR(i->dest), VR(s2), VR(s3), VR(s1));
-  } else if (i->dest->type == FLOAT64_TYPE) {
-    e.asm_().FMSUB_D(VR(i->dest), VR(s2), VR(s3), VR(s1));
-  } else if (i->dest->type == VEC128_TYPE) {
-    e.asm_().MOV_16B(VR(i->dest), VR(s1));
-    e.asm_().FMLS_4S(VR(i->dest), VR(s2), VR(s3));
-  }
-  return true;
+  return EmitMulAddSub(e, i, true);
 }
 
 static bool EmitVec128UnaryViaHelper(A64Emitter& e, const Instr* i,
@@ -3108,15 +3861,17 @@ static bool EmitLog2(A64Emitter& e, const Instr* i) {
 static bool EmitDotProduct3(A64Emitter& e, const Instr* i) {
   if (!i->dest || !IsAlloc(i->dest)) return true;
   auto s1 = i->src1.value, s2 = i->src2.value;
-  if (!IsAlloc(s1) || !IsAlloc(s2)) { e.asm_().NOP(); return true; }
+  if (!s1 || !s2) return true;
   VReg vd = VR(i->dest);
+  e.ChangeFpcrMode(A64Emitter::FpcrMode::Vmx);
+  VReg v1 = LoadVec128(e, s1, kVScratch0);
+  VReg v2 = LoadVec128(e, s2, kVScratch1);
   // dp3 = s1[0]*s2[0] + s1[1]*s2[1] + s1[2]*s2[2]
-  e.asm_().FMUL_4S(kVScratch0, VR(s1), VR(s2));  // element-wise multiply
+  e.asm_().FMUL_4S(kVScratch0, v1, v2);  // element-wise multiply
   // Zero out lane 3 before summing
   e.asm_().MOVI_4S_zero(kVScratch1);
   e.asm_().INS_S(kVScratch0, 3, kVScratch1, 0);  // zero lane 3
   // Horizontal pairwise add: [a+b, c+0, ...] then [a+b+c+0, ...]
-  e.asm_().FADD_4S(kVScratch1, kVScratch0, kVScratch0);  // won't work for hadd
   // Use EXT + FADD pattern for horizontal sum
   e.asm_().EXT_16B(kVScratch1, kVScratch0, kVScratch0, 4);
   e.asm_().FADD_4S(kVScratch0, kVScratch0, kVScratch1);
@@ -3130,10 +3885,13 @@ static bool EmitDotProduct3(A64Emitter& e, const Instr* i) {
 static bool EmitDotProduct4(A64Emitter& e, const Instr* i) {
   if (!i->dest || !IsAlloc(i->dest)) return true;
   auto s1 = i->src1.value, s2 = i->src2.value;
-  if (!IsAlloc(s1) || !IsAlloc(s2)) { e.asm_().NOP(); return true; }
+  if (!s1 || !s2) return true;
   VReg vd = VR(i->dest);
+  e.ChangeFpcrMode(A64Emitter::FpcrMode::Vmx);
+  VReg v1 = LoadVec128(e, s1, kVScratch0);
+  VReg v2 = LoadVec128(e, s2, kVScratch1);
   // dp4 = sum of element-wise products
-  e.asm_().FMUL_4S(kVScratch0, VR(s1), VR(s2));
+  e.asm_().FMUL_4S(kVScratch0, v1, v2);
   // Horizontal sum via EXT+FADD
   e.asm_().EXT_16B(kVScratch1, kVScratch0, kVScratch0, 4);
   e.asm_().FADD_4S(kVScratch0, kVScratch0, kVScratch1);
@@ -3156,20 +3914,23 @@ static bool EmitSplat(A64Emitter& e, const Instr* i) {
   auto src = i->src1.value;
   if (!src) return true;
   VReg vd = VR(i->dest);
+  if (src->type == FLOAT32_TYPE && !VALUE_IS_CONSTANT(src)) {
+    e.asm_().DUP_S(vd, VR(src), 0);
+    return true;
+  }
+  GReg rs;
   if (VALUE_IS_CONSTANT(src)) {
-    if (src->type <= INT64_TYPE) {
-      e.MovImm64(kScratch0, src->constant.i64);
-      e.asm_().DUP_4S(vd, kScratch0);
-    } else {
-      e.LoadConstantV128(vd, src->constant.v128);
-    }
-  } else if (IsAlloc(src)) {
-    if (src->type <= INT64_TYPE) {
-      e.asm_().DUP_4S(vd, GR(src));
-    } else {
-      // DUP first element
-      e.asm_().DUP_S(vd, VR(src), 0);
-    }
+    e.MovImm64(kScratch0, src->type == INT8_TYPE    ? src->constant.u8
+                          : src->type == INT16_TYPE ? src->constant.u16
+                                                    : src->constant.u32);
+    rs = kScratch0;
+  } else {
+    rs = GR(src);
+  }
+  switch (src->type) {
+    case INT8_TYPE:  e.asm_().DUP_16B(vd, rs); break;
+    case INT16_TYPE: e.asm_().DUP_8H(vd, rs); break;
+    default:         e.asm_().DUP_4S(vd, rs); break;
   }
   return true;
 }
@@ -3334,6 +4095,9 @@ static bool EmitVectorAdd(A64Emitter& e, const Instr* i) {
   VReg v2 = LoadVec128(e, s2, kVScratch1);
   VReg vd = VR(i->dest);
   const TypeName part_type = static_cast<TypeName>(i->flags & 0xFF);
+  if (part_type == FLOAT32_TYPE) {
+    e.ChangeFpcrMode(A64Emitter::FpcrMode::Vmx);
+  }
   const uint32_t arith = i->flags >> 8;
   const bool is_unsigned = !!(arith & ARITHMETIC_UNSIGNED);
   const bool saturate = !!(arith & ARITHMETIC_SATURATE);
@@ -3362,9 +4126,13 @@ static bool EmitVectorAdd(A64Emitter& e, const Instr* i) {
         e.asm_().ADD_4S(vd, v1, v2);
       }
       return true;
-    case FLOAT32_TYPE:
-      e.asm_().FADD_4S(vd, v1, v2);
+    case FLOAT32_TYPE: {
+      e.asm_().FADD_4S(kVScratch3, v1, v2);
+      const VReg ops[] = {v1, v2};
+      EmitVectorNaNFixup(e, kVScratch3, ops, 2);
+      e.asm_().MOV_16B(vd, kVScratch3);
       return true;
+    }
     default:
       return false;
   }
@@ -3378,6 +4146,9 @@ static bool EmitVectorSub(A64Emitter& e, const Instr* i) {
   VReg v2 = LoadVec128(e, s2, kVScratch1);
   VReg vd = VR(i->dest);
   const TypeName part_type = static_cast<TypeName>(i->flags & 0xFF);
+  if (part_type == FLOAT32_TYPE) {
+    e.ChangeFpcrMode(A64Emitter::FpcrMode::Vmx);
+  }
   const uint32_t arith = i->flags >> 8;
   const bool is_unsigned = !!(arith & ARITHMETIC_UNSIGNED);
   const bool saturate = !!(arith & ARITHMETIC_SATURATE);
@@ -3406,9 +4177,13 @@ static bool EmitVectorSub(A64Emitter& e, const Instr* i) {
         e.asm_().SUB_4S(vd, v1, v2);
       }
       return true;
-    case FLOAT32_TYPE:
-      e.asm_().FSUB_4S(vd, v1, v2);
+    case FLOAT32_TYPE: {
+      e.asm_().FSUB_4S(kVScratch3, v1, v2);
+      const VReg ops[] = {v1, v2};
+      EmitVectorNaNFixup(e, kVScratch3, ops, 2);
+      e.asm_().MOV_16B(vd, kVScratch3);
       return true;
+    }
     default:
       return false;
   }
@@ -3425,6 +4200,9 @@ static bool EmitVectorCompareCommon(A64Emitter& e, const Instr* i,
   VReg v1 = LoadVec128(e, s1, kVScratch0);
   VReg v2 = LoadVec128(e, s2, kVScratch1);
   VReg vd = VR(i->dest);
+  if (static_cast<TypeName>(i->flags) == FLOAT32_TYPE) {
+    e.ChangeFpcrMode(A64Emitter::FpcrMode::Vmx);
+  }
   switch (static_cast<TypeName>(i->flags)) {
     case INT8_TYPE:
       switch (cmp) {
@@ -3490,6 +4268,9 @@ static bool EmitVectorMinMaxCommon(A64Emitter& e, const Instr* i, bool is_max) {
   VReg vd = VR(i->dest);
   // VECTOR_MAX/MIN: flags = arithmetic_flags | (part_type << 8)
   const TypeName part_type = static_cast<TypeName>(i->flags >> 8);
+  if (part_type == FLOAT32_TYPE) {
+    e.ChangeFpcrMode(A64Emitter::FpcrMode::Vmx);
+  }
   const bool is_unsigned = !!(i->flags & ARITHMETIC_UNSIGNED);
   switch (part_type) {
     case INT8_TYPE:
@@ -3519,10 +4300,14 @@ static bool EmitVectorMinMaxCommon(A64Emitter& e, const Instr* i, bool is_max) {
         else e.asm_().SMIN_4S(vd, v1, v2);
       }
       return true;
-    case FLOAT32_TYPE:
-      if (is_max) e.asm_().FMAX_4S(vd, v1, v2);
-      else e.asm_().FMIN_4S(vd, v1, v2);
+    case FLOAT32_TYPE: {
+      if (is_max) e.asm_().FMAX_4S(kVScratch3, v1, v2);
+      else e.asm_().FMIN_4S(kVScratch3, v1, v2);
+      const VReg ops[] = {v1, v2};
+      EmitVectorNaNFixup(e, kVScratch3, ops, 2);
+      e.asm_().MOV_16B(vd, kVScratch3);
       return true;
+    }
     default:
       return false;
   }
@@ -3796,6 +4581,21 @@ static bool EmitPermute(A64Emitter& e, const Instr* i) {
     return true;
   }
 
+  if (i->flags == INT16_TYPE) {
+    // Halfword-granularity select from the 16-halfword concatenation; the
+    // control must be a constant (as on x64 without AVX-512).
+    if (!VALUE_IS_CONSTANT(ctrl)) return false;
+    vec128_t idx;
+    for (uint32_t n = 0; n < 8; ++n) {
+      const uint32_t lane = (ctrl->constant.v128.u16[n] & 0xF) ^ 0x1;
+      idx.u8[n * 2] = static_cast<uint8_t>(lane * 2);
+      idx.u8[n * 2 + 1] = static_cast<uint8_t>(lane * 2 + 1);
+    }
+    e.LoadConstantV128(kVScratch2, idx);
+    e.asm_().TBL2(vd, kVScratch0, kVScratch2);
+    return true;
+  }
+
   if (i->flags == INT8_TYPE) {
     // vperm: each guest control byte selects from the 32-byte guest
     // concatenation. In host layout both the control byte position and the
@@ -3866,6 +4666,232 @@ static bool EmitVec128UnaryViaHelper(A64Emitter& e, const Instr* i,
   return true;
 }
 
+
+// --- PACK/UNPACK helpers for the remaining modes -------------------------
+// vec128_t is held in host layout: guest word i is u32[i], so guest halfword
+// j is u16[j ^ 1] and guest byte k is u8[k ^ 3]. Index math below follows the
+// x64 backend's shuffles.
+
+static inline uint32_t A64ClampFloatBits(float f, uint32_t min_bits,
+                                         uint32_t max_bits) {
+  float lo, hi;
+  std::memcpy(&lo, &min_bits, sizeof(lo));
+  std::memcpy(&hi, &max_bits, sizeof(hi));
+  if (!(f >= lo)) f = lo;  // also catches NaN, like vmaxps(src, min)
+  if (f > hi) f = hi;
+  uint32_t bits;
+  std::memcpy(&bits, &f, sizeof(bits));
+  return bits;
+}
+
+extern "C" uint64_t A64PackSHORT_4(void* raw_context, uint64_t arg0,
+                                   uint64_t arg1) {
+  auto* backend_context = A64GetBackendContext(raw_context);
+  auto* value = reinterpret_cast<vec128_t*>(backend_context->helper_scratch);
+  const vec128_t v = *value;
+  uint32_t s[4];
+  for (int n = 0; n < 4; ++n) {
+    s[n] = A64ClampFloatBits(v.f32[n], 0x403F8001u, 0x40407FFFu) & 0xFFFF;
+  }
+  vec128_t r = vec128b(0);
+  r.u32[2] = (s[0] << 16) | s[1];
+  r.u32[3] = (s[2] << 16) | s[3];
+  *value = r;
+  return 0;
+}
+
+extern "C" uint64_t A64UnpackSHORT_4(void* raw_context, uint64_t arg0,
+                                     uint64_t arg1) {
+  auto* backend_context = A64GetBackendContext(raw_context);
+  auto* value = reinterpret_cast<vec128_t*>(backend_context->helper_scratch);
+  const vec128_t v = *value;
+  const uint16_t in[4] = {v.u16[5], v.u16[4], v.u16[7], v.u16[6]};
+  vec128_t r;
+  for (int n = 0; n < 4; ++n) {
+    r.u32[n] = 0x40400000u + uint32_t(int32_t(int16_t(in[n])));
+    if (r.u32[n] == 0x403F8000u) r.u32[n] = 0x7FC00000u;
+  }
+  *value = r;
+  return 0;
+}
+
+extern "C" uint64_t A64PackUINT_2101010(void* raw_context, uint64_t arg0,
+                                        uint64_t arg1) {
+  auto* backend_context = A64GetBackendContext(raw_context);
+  auto* value = reinterpret_cast<vec128_t*>(backend_context->helper_scratch);
+  const vec128_t v = *value;
+  const uint32_t x = A64ClampFloatBits(v.f32[0], 0x403FFE01u, 0x404001FFu);
+  const uint32_t y = A64ClampFloatBits(v.f32[1], 0x403FFE01u, 0x404001FFu);
+  const uint32_t z = A64ClampFloatBits(v.f32[2], 0x403FFE01u, 0x404001FFu);
+  const uint32_t w = A64ClampFloatBits(v.f32[3], 0x40400000u, 0x40400003u);
+  const uint32_t packed = (x & 0x3FF) | ((y & 0x3FF) << 10) |
+                          ((z & 0x3FF) << 20) | ((w & 0x3) << 30);
+  vec128_t r;
+  r.u32[0] = r.u32[1] = r.u32[2] = r.u32[3] = packed;
+  *value = r;
+  return 0;
+}
+
+extern "C" uint64_t A64UnpackUINT_2101010(void* raw_context, uint64_t arg0,
+                                          uint64_t arg1) {
+  auto* backend_context = A64GetBackendContext(raw_context);
+  auto* value = reinterpret_cast<vec128_t*>(backend_context->helper_scratch);
+  const uint32_t t = value->u32[3];
+  const uint32_t parts[4] = {t & 0x3FF, (t >> 10) & 0x3FF, (t >> 20) & 0x3FF,
+                             t >> 30};
+  vec128_t r;
+  for (int n = 0; n < 4; ++n) {
+    const int32_t sx = int32_t(parts[n] << 22) >> 22;
+    r.u32[n] = (n == 3 ? 0x3F800000u : 0x40400000u) + uint32_t(sx);
+    if (r.u32[n] == 0x403FFE00u) r.u32[n] = 0x7FC00000u;
+  }
+  *value = r;
+  return 0;
+}
+
+extern "C" uint64_t A64PackULONG_4202020(void* raw_context, uint64_t arg0,
+                                         uint64_t arg1) {
+  auto* backend_context = A64GetBackendContext(raw_context);
+  auto* value = reinterpret_cast<vec128_t*>(backend_context->helper_scratch);
+  const vec128_t v = *value;
+  const uint64_t x =
+      A64ClampFloatBits(v.f32[0], 0x40380001u, 0x4047FFFFu) & 0xFFFFF;
+  const uint64_t y =
+      A64ClampFloatBits(v.f32[1], 0x40380001u, 0x4047FFFFu) & 0xFFFFF;
+  const uint64_t z =
+      A64ClampFloatBits(v.f32[2], 0x40380001u, 0x4047FFFFu) & 0xFFFFF;
+  const uint64_t w =
+      A64ClampFloatBits(v.f32[3], 0x40400000u, 0x4040000Fu) & 0xF;
+  const uint64_t packed = x | (y << 20) | (z << 40) | (w << 60);
+  vec128_t r = vec128b(0);
+  r.u32[3] = uint32_t(packed);
+  r.u32[2] = uint32_t(packed >> 32);
+  *value = r;
+  return 0;
+}
+
+extern "C" uint64_t A64UnpackULONG_4202020(void* raw_context, uint64_t arg0,
+                                           uint64_t arg1) {
+  auto* backend_context = A64GetBackendContext(raw_context);
+  auto* value = reinterpret_cast<vec128_t*>(backend_context->helper_scratch);
+  const uint64_t t =
+      (uint64_t(value->u32[2]) << 32) | uint64_t(value->u32[3]);
+  const uint32_t parts[4] = {uint32_t(t & 0xFFFFF),
+                             uint32_t((t >> 20) & 0xFFFFF),
+                             uint32_t((t >> 40) & 0xFFFFF), uint32_t(t >> 60)};
+  vec128_t r;
+  for (int n = 0; n < 4; ++n) {
+    const int32_t sx = int32_t(parts[n] << 12) >> 12;
+    r.u32[n] = (n == 3 ? 0x3F800000u : 0x40400000u) + uint32_t(sx);
+    if (r.u32[n] == 0x40380000u) r.u32[n] = 0x7FC00000u;
+  }
+  *value = r;
+  return 0;
+}
+
+template <typename In, typename Out>
+static inline Out A64PackNarrow(In v, bool in_unsigned, bool out_unsigned,
+                                bool saturate) {
+  using UIn = typename std::make_unsigned<In>::type;
+  using SIn = typename std::make_signed<In>::type;
+  using UOut = typename std::make_unsigned<Out>::type;
+  using SOut = typename std::make_signed<Out>::type;
+  if (!saturate) {
+    return Out(v);
+  }
+  if (in_unsigned) {
+    const UIn u = UIn(v);
+    const UIn max = out_unsigned ? UIn(std::numeric_limits<UOut>::max())
+                                 : UIn(std::numeric_limits<SOut>::max());
+    return Out(u > max ? max : u);
+  }
+  const SIn sv = SIn(v);
+  if (out_unsigned) {
+    const SIn max = SIn(std::numeric_limits<UOut>::max());
+    return Out(sv < 0 ? 0 : (sv > max ? max : sv));
+  }
+  const SIn min = SIn(std::numeric_limits<SOut>::min());
+  const SIn max = SIn(std::numeric_limits<SOut>::max());
+  return Out(sv < min ? min : (sv > max ? max : sv));
+}
+
+// arg0 = pack flags. Sources are helper_scratch[0..1] and [2..3].
+extern "C" uint64_t A64PackNarrowing(void* raw_context, uint64_t flags_u64,
+                                     uint64_t arg1) {
+  auto* backend_context = A64GetBackendContext(raw_context);
+  auto* values = reinterpret_cast<vec128_t*>(backend_context->helper_scratch);
+  const vec128_t a = values[0];
+  const vec128_t b = values[1];
+  const uint32_t flags = static_cast<uint32_t>(flags_u64);
+  const bool in_unsigned = IsPackInUnsigned(flags);
+  const bool out_unsigned = IsPackOutUnsigned(flags);
+  const bool saturate = IsPackOutSaturate(flags);
+  vec128_t r;
+  if ((flags & PACK_TYPE_MODE) == PACK_TYPE_8_IN_16) {
+    for (int k = 0; k < 16; ++k) {
+      const uint16_t in = (k < 8 ? a : b).u16[k & 7];
+      r.u8[k ^ 2] = A64PackNarrow<uint16_t, uint8_t>(in, in_unsigned,
+                                                     out_unsigned, saturate);
+    }
+  } else {
+    for (int k = 0; k < 8; ++k) {
+      const uint32_t in = (k < 4 ? a : b).u32[k & 3];
+      r.u16[k ^ 1] = A64PackNarrow<uint32_t, uint16_t>(in, in_unsigned,
+                                                       out_unsigned, saturate);
+    }
+  }
+  values[0] = r;
+  return 0;
+}
+
+// arg0 = pack flags; sign-extending widen of the high or low half.
+extern "C" uint64_t A64UnpackWidening(void* raw_context, uint64_t flags_u64,
+                                      uint64_t arg1) {
+  auto* backend_context = A64GetBackendContext(raw_context);
+  auto* value = reinterpret_cast<vec128_t*>(backend_context->helper_scratch);
+  const vec128_t v = *value;
+  const uint32_t flags = static_cast<uint32_t>(flags_u64);
+  const bool to_lo = IsPackToLo(flags);
+  vec128_t r;
+  if ((flags & PACK_TYPE_MODE) == PACK_TYPE_8_IN_16) {
+    for (int n = 0; n < 8; ++n) {
+      r.i16[n] = int16_t(int8_t(v.u8[((to_lo ? 8 : 0) + n) ^ 2]));
+    }
+  } else {
+    for (int n = 0; n < 4; ++n) {
+      r.i32[n] = int32_t(int16_t(v.u16[(to_lo ? 4 : 0) + (n ^ 1)]));
+    }
+  }
+  *value = r;
+  return 0;
+}
+
+// Runs a (v128, v128) -> v128 operation through a C helper.
+static bool EmitVec128BinaryViaHelper(A64Emitter& e, const Instr* i,
+                                      const Value* src1, const Value* src2,
+                                      uint64_t helper_address, uint64_t arg0) {
+  if (!i->dest || !IsAlloc(i->dest) || !src1 || !src2) return true;
+  const int32_t scratch_offset =
+      static_cast<int32_t>(offsetof(A64BackendContext, helper_scratch));
+  VReg v1 = LoadVec128(e, src1, kVScratch0);
+  VReg v2 = LoadVec128(e, src2, kVScratch1);
+  e.asm_().SUB(kScratch1, kContextReg,
+               static_cast<uint32_t>(sizeof(A64BackendContext)));
+  e.asm_().STR_Q(v1, kScratch1, scratch_offset);
+  e.asm_().STR_Q(v2, kScratch1, scratch_offset + 16);
+  e.MovImm64(X1, arg0);
+  e.MovImm64(X2, 0);
+  e.MovImm64(X0, helper_address);
+  auto backend = static_cast<A64Backend*>(e.backend());
+  e.MovImm64(kScratch0,
+             reinterpret_cast<uint64_t>(backend->guest_to_host_thunk()));
+  e.asm_().BLR(kScratch0);
+  e.asm_().SUB(kScratch1, kContextReg,
+               static_cast<uint32_t>(sizeof(A64BackendContext)));
+  e.asm_().LDR_Q(VR(i->dest), kScratch1, scratch_offset);
+  return true;
+}
+
 static bool EmitPack(A64Emitter& e, const Instr* i) {
   if (!i->dest || !IsAlloc(i->dest)) return true;
   auto src1 = i->src1.value;
@@ -3890,21 +4916,23 @@ static bool EmitPack(A64Emitter& e, const Instr* i) {
     case PACK_TYPE_SHORT_2:
       return EmitVec128UnaryViaHelper(
           e, i, src1, reinterpret_cast<uint64_t>(&A64PackSHORT_2), 0);
+    case PACK_TYPE_SHORT_4:
+      return EmitVec128UnaryViaHelper(
+          e, i, src1, reinterpret_cast<uint64_t>(&A64PackSHORT_4), 0);
+    case PACK_TYPE_UINT_2101010:
+      return EmitVec128UnaryViaHelper(
+          e, i, src1, reinterpret_cast<uint64_t>(&A64PackUINT_2101010), 0);
+    case PACK_TYPE_ULONG_4202020:
+      return EmitVec128UnaryViaHelper(
+          e, i, src1, reinterpret_cast<uint64_t>(&A64PackULONG_4202020), 0);
     case PACK_TYPE_8_IN_16:
     case PACK_TYPE_16_IN_32:
-    case PACK_TYPE_SHORT_4:
-    case PACK_TYPE_UINT_2101010:
-    case PACK_TYPE_ULONG_4202020:
+      return EmitVec128BinaryViaHelper(
+          e, i, src1, i->src2.value,
+          reinterpret_cast<uint64_t>(&A64PackNarrowing), i->flags);
     default:
-      // TODO: unimplemented pack modes — copy through for now
-      if (IsAlloc(src1)) {
-        e.asm_().MOV_16B(vd, VR(src1));
-      } else {
-        e.asm_().MOVI_4S_zero(vd);
-      }
-      break;
+      return false;
   }
-  return true;
 }
 
 static bool EmitUnpack(A64Emitter& e, const Instr* i) {
@@ -3931,31 +4959,35 @@ static bool EmitUnpack(A64Emitter& e, const Instr* i) {
     case PACK_TYPE_SHORT_2:
       return EmitVec128UnaryViaHelper(
           e, i, src, reinterpret_cast<uint64_t>(&A64UnpackSHORT_2), 0);
+    case PACK_TYPE_SHORT_4:
+      return EmitVec128UnaryViaHelper(
+          e, i, src, reinterpret_cast<uint64_t>(&A64UnpackSHORT_4), 0);
+    case PACK_TYPE_UINT_2101010:
+      return EmitVec128UnaryViaHelper(
+          e, i, src, reinterpret_cast<uint64_t>(&A64UnpackUINT_2101010), 0);
+    case PACK_TYPE_ULONG_4202020:
+      return EmitVec128UnaryViaHelper(
+          e, i, src, reinterpret_cast<uint64_t>(&A64UnpackULONG_4202020), 0);
     case PACK_TYPE_8_IN_16:
     case PACK_TYPE_16_IN_32:
-    case PACK_TYPE_SHORT_4:
-    case PACK_TYPE_UINT_2101010:
-    case PACK_TYPE_ULONG_4202020:
+      return EmitVec128UnaryViaHelper(
+          e, i, src, reinterpret_cast<uint64_t>(&A64UnpackWidening),
+          i->flags);
     default:
-      // TODO: unimplemented unpack modes — copy through for now
-      if (IsAlloc(src)) {
-        e.asm_().MOV_16B(vd, VR(src));
-      } else {
-        e.asm_().MOVI_4S_zero(vd);
-      }
-      break;
+      return false;
   }
-  return true;
 }
 
 static bool EmitVectorConvertI2F(A64Emitter& e, const Instr* i) {
   if (!i->dest || !IsAlloc(i->dest)) return true;
   auto src = i->src1.value;
-  if (!src || !IsAlloc(src)) { e.asm_().NOP(); return true; }
+  if (!src) return true;
+  e.ChangeFpcrMode(A64Emitter::FpcrMode::Vmx);
+  VReg vs = LoadVec128(e, src, kVScratch0);
   if (i->flags & ARITHMETIC_UNSIGNED) {
-    e.asm_().UCVTF_4S(VR(i->dest), VR(src));
+    e.asm_().UCVTF_4S(VR(i->dest), vs);
   } else {
-    e.asm_().SCVTF_4S(VR(i->dest), VR(src));
+    e.asm_().SCVTF_4S(VR(i->dest), vs);
   }
   return true;
 }
@@ -3963,11 +4995,13 @@ static bool EmitVectorConvertI2F(A64Emitter& e, const Instr* i) {
 static bool EmitVectorConvertF2I(A64Emitter& e, const Instr* i) {
   if (!i->dest || !IsAlloc(i->dest)) return true;
   auto src = i->src1.value;
-  if (!src || !IsAlloc(src)) { e.asm_().NOP(); return true; }
+  if (!src) return true;
+  e.ChangeFpcrMode(A64Emitter::FpcrMode::Vmx);
+  VReg vs = LoadVec128(e, src, kVScratch0);
   if (i->flags & ARITHMETIC_UNSIGNED) {
-    e.asm_().FCVTZU_4S(VR(i->dest), VR(src));
+    e.asm_().FCVTZU_4S(VR(i->dest), vs);
   } else {
-    e.asm_().FCVTZS_4S(VR(i->dest), VR(src));
+    e.asm_().FCVTZS_4S(VR(i->dest), vs);
   }
   return true;
 }
@@ -3975,10 +5009,18 @@ static bool EmitVectorConvertF2I(A64Emitter& e, const Instr* i) {
 static bool EmitVectorDenormFlush(A64Emitter& e, const Instr* i) {
   if (!i->dest || !IsAlloc(i->dest)) return true;
   auto src = i->src1.value;
-  if (!src || !IsAlloc(src)) { e.asm_().NOP(); return true; }
-  // On ARM64 with FZ bit set in FPCR, denorms flush automatically
-  // Just copy through
-  e.asm_().MOV_16B(VR(i->dest), VR(src));
+  if (!src) return true;
+  // Replace denormal lanes (zero exponent) with a same-signed zero.
+  VReg vs = LoadVec128(e, src, kVScratch0);
+  e.MovImm64(kScratch0, 0x7F800000u);
+  e.asm_().DUP_4S(kVScratch1, kScratch0);
+  e.asm_().AND_16B(kVScratch2, vs, kVScratch1);     // exponent bits
+  e.asm_().MOVI_4S_zero(kVScratch1);
+  e.asm_().CMEQ_4S(kVScratch2, kVScratch2, kVScratch1);  // exponent == 0
+  e.MovImm64(kScratch0, 0x7FFFFFFFu);
+  e.asm_().DUP_4S(kVScratch1, kScratch0);
+  e.asm_().AND_16B(kVScratch2, kVScratch2, kVScratch1);  // bits to clear
+  e.asm_().BIC_16B(VR(i->dest), vs, kVScratch2);
   return true;
 }
 
@@ -4309,6 +5351,19 @@ void RegisterSequences() {
   sequence_table[OPCODE_SELECT] = EmitSelect;
   sequence_table[OPCODE_IS_NAN] = EmitIsNan;
   sequence_table[OPCODE_DELAY_EXECUTION] = EmitNop;
+  sequence_table[OPCODE_SET_NJM] = EmitSetNJM;
+  sequence_table[OPCODE_CLEAR_FP_STATUS] = [](A64Emitter& e, const Instr*) {
+    e.asm_().MSR_FPSR(XZR);
+    return true;
+  };
+  sequence_table[OPCODE_LOAD_FP_STATUS] = [](A64Emitter& e, const Instr* i) {
+    if (!i->dest || !IsAlloc(i->dest)) return true;
+    // FPSR bits 0-4 (IOC, DZC, OFC, UFC, IXC) line up with FP_STATUS_*.
+    e.asm_().MRS_FPSR(kScratch0);
+    e.asm_().MOVZ(kScratch1, 0x1F);
+    e.asm_().ANDw(GR(i->dest), kScratch0, kScratch1);
+    return true;
+  };
 
   sequence_table[OPCODE_ATOMIC_EXCHANGE] = EmitAtomicExchange;
   sequence_table[OPCODE_ATOMIC_COMPARE_EXCHANGE] = EmitAtomicCompareExchange;

@@ -37,6 +37,9 @@ namespace a64 {
 
 namespace {
 
+// Title-specific tracing from backend bring-up; off unless re-enabled here.
+constexpr bool kEnableTitleSpecificTracing = false;
+
 bool ShouldDumpHotLoopWindow(uint32_t guest_target) {
   switch (guest_target) {
     case 0x820CC1AC:
@@ -153,7 +156,7 @@ extern "C" uint64_t A64ResolveFunction(void* raw_context,
   static std::unordered_set<uint32_t> hot_target_log_once;
   auto count = ++resolve_count;
   if (count <= 10 || (count % 1000000) == 0) {
-    XELOGI("ARM64: ResolveFunction #{} target={:08X}", count, target_address);
+    XELOGD("ARM64: ResolveFunction #{} target={:08X}", count, target_address);
   }
 
   auto guest_context = reinterpret_cast<ppc::PPCContext_s*>(raw_context);
@@ -166,6 +169,11 @@ extern "C" uint64_t A64ResolveFunction(void* raw_context,
         uint32_t(guest_context->r[1]), uint32_t(guest_context->r[13]));
     LogGuestInstructionRange(thread_state, uint32_t(guest_context->lr), 6, 6);
   }
+  if (uint64_t trampoline =
+          static_cast<A64Backend*>(thread_state->processor()->backend())
+              ->LookupGuestTrampoline(static_cast<uint32_t>(target_address))) {
+    return trampoline;
+  }
   auto fn = thread_state->processor()->ResolveFunction(
       static_cast<uint32_t>(target_address));
   if (!fn) {
@@ -175,11 +183,12 @@ extern "C" uint64_t A64ResolveFunction(void* raw_context,
   auto a64_fn = static_cast<A64Function*>(fn);
 
   uint32_t guest_target = static_cast<uint32_t>(target_address);
-  if (ShouldLogHotLoopState(guest_target)) {
+  if (kEnableTitleSpecificTracing && ShouldLogHotLoopState(guest_target)) {
     LogHotLoopState(guest_context, guest_target);
   }
-  if ((guest_target >= 0x820C0000 && guest_target < 0x820D0000) ||
-      guest_target == 0x820D4C18) {
+  if (kEnableTitleSpecificTracing &&
+      ((guest_target >= 0x820C0000 && guest_target < 0x820D0000) ||
+       guest_target == 0x820D4C18)) {
     bool should_log = false;
     {
       std::lock_guard<std::mutex> lock(hot_target_log_mutex);
@@ -470,6 +479,8 @@ void A64Backend::InitializeBackendContext(void* ctx) {
   auto* a64ctx = BackendContextForGuestContext(ctx);
   memset(a64ctx, 0, sizeof(A64BackendContext));
   a64ctx->reserve_helper_ = &reserve_helper_;
+  a64ctx->fpcr_fpu = 0;
+  a64ctx->fpcr_vmx = kA64FpcrFlushToZero;
 }
 
 void A64Backend::DeinitializeBackendContext(void* ctx) {
@@ -487,56 +498,84 @@ void A64Backend::PrepareForReentry(void* ctx) {
 
 void A64Backend::SetGuestRoundingMode(void* ctx, unsigned int mode) {
   // PPC FPSCR[RN]: 0=nearest, 1=toward zero, 2=+inf, 3=-inf.
+  // ARM FPCR RMode: 0=nearest, 1=+inf, 2=-inf, 3=zero.
   // Applies to the calling thread, which is the one executing guest code.
-  switch (mode & 3) {
-    case 0: std::fesetround(FE_TONEAREST); break;
-    case 1: std::fesetround(FE_TOWARDZERO); break;
-    case 2: std::fesetround(FE_UPWARD); break;
-    case 3: std::fesetround(FE_DOWNWARD); break;
-  }
+  static const uint32_t kPpcToArmRMode[4] = {0, 3, 1, 2};
+  auto* a64ctx = BackendContextForGuestContext(ctx);
+  a64ctx->fpcr_fpu = kPpcToArmRMode[mode & 3] << kA64FpcrRModeShift;
+  a64ctx->flags &= ~(1u << kA64BackendVmxModeBit);
+#if defined(__aarch64__)
+  const uint64_t fpcr = a64ctx->fpcr_fpu;
+  __asm__ volatile("msr fpcr, %0" : : "r"(fpcr));
+#endif
 }
 
 uint32_t A64Backend::CreateGuestTrampoline(GuestTrampolineProc proc,
                                            void* userdata1, void* userdata2,
                                            bool long_term) {
-  if (!guest_trampoline_memory_) return 0;
-
-  // Emit a small trampoline that calls proc(userdata1, userdata2)
+  // A guest trampoline is a guest-callable address that lands in
+  // proc(PPCContext*, userdata1, userdata2). Route it through the
+  // guest-to-host thunk (which supplies the context and preserves the JIT's
+  // vector registers) exactly like the x64 backend's trampoline template.
   A64Asm tramp;
-  tramp.MOV64(X0, reinterpret_cast<uint64_t>(userdata1));
-  tramp.MOV64(X1, reinterpret_cast<uint64_t>(userdata2));
-  tramp.MOV64(X8, reinterpret_cast<uint64_t>(proc));
-  tramp.BR(X8);
+  tramp.MOV64(X0, reinterpret_cast<uint64_t>(proc));
+  tramp.MOV64(X1, reinterpret_cast<uint64_t>(userdata1));
+  tramp.MOV64(X2, reinterpret_cast<uint64_t>(userdata2));
+  tramp.MOV64(X9, reinterpret_cast<uint64_t>(guest_to_host_thunk_));
+  tramp.BR(X9);
 
-  // Place into trampoline memory
-  size_t size = tramp.code_size();
-  if (trampoline_offset_ + size > (GUEST_TRAMPOLINE_END - GUEST_TRAMPOLINE_BASE)) {
-    return 0;  // Out of space
+  std::lock_guard<std::mutex> lock(guest_trampoline_mutex_);
+  uint32_t index;
+  if (!free_guest_trampoline_indices_.empty()) {
+    index = free_guest_trampoline_indices_.back();
+    free_guest_trampoline_indices_.pop_back();
+  } else {
+    if (next_guest_trampoline_index_ >= MAX_GUEST_TRAMPOLINES) {
+      return 0;
+    }
+    index = next_guest_trampoline_index_++;
   }
 
-  uint8_t* dest = guest_trampoline_memory_ + trampoline_offset_;
-#ifdef __APPLE__
-  pthread_jit_write_protect_np(0);
-#endif
-  memcpy(dest, tramp.code(), size);
-#ifdef __APPLE__
-  pthread_jit_write_protect_np(1);
-#endif
+  EmitFunctionInfo info = {};
+  info.code_size.total = tramp.code_size();
+  void* execute_address = nullptr;
+  void* write_address = nullptr;
+  code_cache_->PlaceHostCode(0, const_cast<uint32_t*>(tramp.code()), info,
+                             execute_address, write_address);
+  code_cache_->FlushCodeRange(execute_address, tramp.code_size());
 
-#ifdef __APPLE__
-  sys_dcache_flush(dest, size);
-  sys_icache_invalidate(dest, size);
-#else
-  __builtin___clear_cache(reinterpret_cast<char*>(dest),
-                          reinterpret_cast<char*>(dest) + size);
-#endif
-
-  uint32_t addr = GUEST_TRAMPOLINE_BASE + (uint32_t)trampoline_offset_;
-  trampoline_offset_ += (size + 15) & ~15;  // 16-byte align
-  return addr;
+  const uint32_t guest_address =
+      GUEST_TRAMPOLINE_BASE + index * GUEST_TRAMPOLINE_MIN_LEN;
+  const uint64_t host_address = reinterpret_cast<uint64_t>(execute_address);
+  guest_trampolines_[guest_address] = host_address;
+  TryPatchIndirection(guest_address, host_address);
+  return guest_address;
 }
 
-void A64Backend::FreeGuestTrampoline(uint32_t trampoline_addr) {}
+void A64Backend::FreeGuestTrampoline(uint32_t trampoline_addr) {
+  if (trampoline_addr < GUEST_TRAMPOLINE_BASE ||
+      trampoline_addr >= GUEST_TRAMPOLINE_END) {
+    return;
+  }
+  std::lock_guard<std::mutex> lock(guest_trampoline_mutex_);
+  if (guest_trampolines_.erase(trampoline_addr)) {
+    if (code_cache_->has_indirection_table()) {
+      code_cache_->AddIndirection(trampoline_addr, 0);
+    }
+    free_guest_trampoline_indices_.push_back(
+        (trampoline_addr - GUEST_TRAMPOLINE_BASE) / GUEST_TRAMPOLINE_MIN_LEN);
+  }
+}
+
+uint64_t A64Backend::LookupGuestTrampoline(uint32_t guest_address) {
+  if (guest_address < GUEST_TRAMPOLINE_BASE ||
+      guest_address >= GUEST_TRAMPOLINE_END) {
+    return 0;
+  }
+  std::lock_guard<std::mutex> lock(guest_trampoline_mutex_);
+  auto it = guest_trampolines_.find(guest_address);
+  return it != guest_trampolines_.end() ? it->second : 0;
+}
 
 bool A64Backend::ExceptionCallbackThunk(Exception* ex, void* data) {
   return static_cast<A64Backend*>(data)->ExceptionCallback(ex);

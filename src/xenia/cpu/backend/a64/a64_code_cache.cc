@@ -45,8 +45,11 @@ bool PosixA64CodeCache::Initialize() {
   // Instead, use mmap with MAP_JIT for executable memory.
   // This bypasses the base class Initialize() entirely.
 
-  // 64MB is plenty for JIT code — most games use < 10MB
-  jit_region_size_ = 64 * 1024 * 1024;
+  // Must cover everything the shared CodeCacheBase logic assumes it owns
+  // (total_size() reports kGeneratedCodeSize, and PlaceCode does no bounds
+  // check of its own). MAP_JIT memory is committed lazily, so reserving the
+  // full range costs nothing up front.
+  jit_region_size_ = kGeneratedCodeSize + 1;
 
   // Allocate JIT-capable memory using MAP_JIT on Apple Silicon
   int flags = MAP_PRIVATE | MAP_ANONYMOUS;
@@ -93,6 +96,9 @@ bool PosixA64CodeCache::Initialize() {
 
   // Initialize the generated code offset
   generated_code_offset_ = 0;
+  // The whole MAP_JIT region is already usable; mark it committed so the base
+  // class doesn't try to mprotect() it (which MAP_JIT memory rejects).
+  generated_code_commit_mark_ = jit_region_size_;
 
   // Don't fill entire region with BRK — just leave it zeroed.
   // Individual code regions will be filled as needed.
@@ -133,7 +139,7 @@ void A64CodeCache::OnCodePlaced(uint32_t guest_address,
   // Log the guest->host mapping so sampled JIT PCs can be attributed to
   // guest functions during debugging.
   if (guest_address) {
-    XELOGI("ARM64: placed {:08X} -> {:p} len={}", guest_address,
+    XELOGD("ARM64: placed {:08X} -> {:p} len={}", guest_address,
            code_execute_address, code_size);
   }
 }

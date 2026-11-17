@@ -6,6 +6,7 @@
 
 #include <memory>
 #include <mutex>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -48,6 +49,17 @@ struct A64BackendStackpoint {
   unsigned guest_stack_;
   unsigned guest_return_address_;
 };
+
+// A64BackendContext::flags bits.
+enum : uint32_t {
+  kA64BackendHasReserveBit = 0,
+  // Set while FPCR holds the VMX configuration (fpcr_vmx: round-to-nearest,
+  // flush-to-zero in non-Java mode); clear while it holds the scalar FPU one
+  // (fpcr_fpu: guest rounding mode, denormals honored).
+  kA64BackendVmxModeBit = 1,
+};
+static constexpr uint32_t kA64FpcrFlushToZero = 1u << 24;
+static constexpr uint32_t kA64FpcrRModeShift = 22;
 
 struct A64BackendContext {
   uint64_t helper_scratch[8];
@@ -109,6 +121,8 @@ class A64Backend : public Backend {
   // Writes the indirection-table slot for a resolved guest function if its
   // table page is committed and the host code lives in the JIT region.
   void TryPatchIndirection(uint32_t guest_address, uint64_t host_address);
+  // Host entry point for a guest trampoline address, or 0 if none.
+  uint64_t LookupGuestTrampoline(uint32_t guest_address);
 
  private:
   static bool ExceptionCallbackThunk(Exception* ex, void* data);
@@ -120,6 +134,11 @@ class A64Backend : public Backend {
   HostToGuestThunk host_to_guest_thunk_ = nullptr;
   GuestToHostThunk guest_to_host_thunk_ = nullptr;
   ResolveFunctionThunk resolve_function_thunk_ = nullptr;
+
+  std::mutex guest_trampoline_mutex_;
+  std::unordered_map<uint32_t, uint64_t> guest_trampolines_;
+  std::vector<uint32_t> free_guest_trampoline_indices_;
+  uint32_t next_guest_trampoline_index_ = 0;
 
   alignas(64) ReserveHelper reserve_helper_;
   BitMap guest_trampoline_address_bitmap_;

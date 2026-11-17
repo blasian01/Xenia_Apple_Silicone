@@ -361,6 +361,13 @@ class A64Asm {
   void CBNZ(GReg rt, Label* label) {
     EmitBranch(0xB5000000 | rt, label, 2);
   }
+  // Test bit and branch (14-bit range). Bits 0-31 only.
+  void TBZ(GReg rt, uint32_t bit, Label* label) {
+    EmitBranch(0x36000000 | ((bit & 0x1F) << 19) | rt, label, 3);
+  }
+  void TBNZ(GReg rt, uint32_t bit, Label* label) {
+    EmitBranch(0x37000000 | ((bit & 0x1F) << 19) | rt, label, 3);
+  }
   void BR(GReg rn) { Emit(0xD61F0000 | (rn << 5)); }
   void BLR(GReg rn) { Emit(0xD63F0000 | (rn << 5)); }
   void RET(GReg rn = X30) { Emit(0xD65F0000 | (rn << 5)); }
@@ -588,6 +595,13 @@ class A64Asm {
   void FMOV_WS(GReg rd, VReg vn) { Emit(0x1E260000 | (vn << 5) | rd); }
   void FMOV_SW(VReg vd, GReg rn) { Emit(0x1E270000 | (rn << 5) | vd); }
 
+  // FPSR (cumulative exception flags)
+  void MRS_FPSR(GReg rt) { Emit(0xD53B4420 | rt); }
+  void MSR_FPSR(GReg rt) { Emit(0xD51B4420 | rt); }
+  // Round to integral, current rounding mode, signalling inexact.
+  void FRINTX_S(VReg vd, VReg vn) { Emit(0x1E274000 | (vn << 5) | vd); }
+  void FRINTX_D(VReg vd, VReg vn) { Emit(0x1E674000 | (vn << 5) | vd); }
+
   // System: MSR/MRS for FPCR (rounding mode)
   void MRS_FPCR(GReg rt) { Emit(0xD53B4400 | rt); }
   void MSR_FPCR(GReg rt) { Emit(0xD51B4400 | rt); }
@@ -699,7 +713,8 @@ class A64Asm {
     Emit(0x4E040C00 | (rn << 5) | vd);
   }
   void DUP_S(VReg vd, VReg vn, uint32_t idx) {
-    Emit(0x4E040400 | ((idx * 4 + 4) << 16) | (vn << 5) | vd);
+    // DUP Vd.4S, Vn.S[idx]: imm5 = idx:100
+    Emit(0x4E000400 | (((idx << 3) | 0x4) << 16) | (vn << 5) | vd);
   }
 
   // NEON variable shifts — per-lane shift amount; negative shifts right
@@ -968,11 +983,78 @@ class A64Asm {
   // NEON <-> GPR moves
   void UMOV(GReg rd, VReg vn, uint32_t idx) {
     // Move 64-bit from vector lane
-    Emit(0x4E083C00 | ((idx * 8 + 8) << 16) | (vn << 5) | rd);
+    // UMOV Xd, Vn.D[idx]: imm5 = idx:1000
+    Emit(0x4E003C00 | (((idx << 4) | 0x8) << 16) | (vn << 5) | rd);
   }
   void INS(VReg vd, uint32_t idx, GReg rn) {
-    Emit(0x4E081C00 | ((idx * 8 + 8) << 16) | (rn << 5) | vd);
+    // INS Vd.D[idx], Xn: imm5 = idx:1000
+    Emit(0x4E001C00 | (((idx << 4) | 0x8) << 16) | (rn << 5) | vd);
   }
+
+  // === Additional integer forms ===
+  void MVNw(GReg rd, GReg rm) { Emit(0x2A2003E0 | (rm << 16) | rd); }
+  void CMPw_imm(GReg rn, uint32_t imm12) {
+    Emit(0x7100001F | ((imm12 & 0xFFF) << 10) | (rn << 5));
+  }
+  void CSELw(GReg rd, GReg rn, GReg rm, Cond cc) {
+    Emit(0x1A800000 | (rm << 16) | (cc << 12) | (rn << 5) | rd);
+  }
+
+  // === Additional scalar FP forms ===
+  // Int -> FP with explicit source width.
+  void SCVTF_D_W(VReg vd, GReg rn) { Emit(0x1E620000 | (rn << 5) | vd); }
+  void SCVTF_D_X(VReg vd, GReg rn) { Emit(0x9E620000 | (rn << 5) | vd); }
+  void SCVTF_S_W(VReg vd, GReg rn) { Emit(0x1E220000 | (rn << 5) | vd); }
+  void SCVTF_S_X(VReg vd, GReg rn) { Emit(0x9E220000 | (rn << 5) | vd); }
+  // FP -> int, round toward zero, saturating.
+  void FCVTZS_W_D(GReg rd, VReg vn) { Emit(0x1E780000 | (vn << 5) | rd); }
+  void FCVTZS_X_D(GReg rd, VReg vn) { Emit(0x9E780000 | (vn << 5) | rd); }
+  void FCVTZS_W_S(GReg rd, VReg vn) { Emit(0x1E380000 | (vn << 5) | rd); }
+  void FCVTZS_X_S(GReg rd, VReg vn) { Emit(0x9E380000 | (vn << 5) | rd); }
+  // Round to integral using the current FPCR rounding mode.
+  void FRINTI_S(VReg vd, VReg vn) { Emit(0x1E27C000 | (vn << 5) | vd); }
+  void FRINTI_D(VReg vd, VReg vn) { Emit(0x1E67C000 | (vn << 5) | vd); }
+  // FNMSUB: Vd = (Vn * Vm) - Va
+  void FNMSUB_S(VReg vd, VReg vn, VReg vm, VReg va) {
+    Emit(0x1F208000 | (vm << 16) | (va << 10) | (vn << 5) | vd);
+  }
+  void FNMSUB_D(VReg vd, VReg vn, VReg vm, VReg va) {
+    Emit(0x1F608000 | (vm << 16) | (va << 10) | (vn << 5) | vd);
+  }
+  void FMAX_S(VReg vd, VReg vn, VReg vm) {
+    Emit(0x1E204800 | (vm << 16) | (vn << 5) | vd);
+  }
+  void FMIN_S(VReg vd, VReg vn, VReg vm) {
+    Emit(0x1E205800 | (vm << 16) | (vn << 5) | vd);
+  }
+  void FMAX_D(VReg vd, VReg vn, VReg vm) {
+    Emit(0x1E604800 | (vm << 16) | (vn << 5) | vd);
+  }
+  void FMIN_D(VReg vd, VReg vn, VReg vm) {
+    Emit(0x1E605800 | (vm << 16) | (vn << 5) | vd);
+  }
+  void FCSEL_S(VReg vd, VReg vn, VReg vm, Cond cc) {
+    Emit(0x1E200C00 | (vm << 16) | (cc << 12) | (vn << 5) | vd);
+  }
+  void FCSEL_D(VReg vd, VReg vn, VReg vm, Cond cc) {
+    Emit(0x1E600C00 | (vm << 16) | (cc << 12) | (vn << 5) | vd);
+  }
+
+  // === Additional NEON forms ===
+  void FDIV_4S(VReg vd, VReg vn, VReg vm) {
+    Emit(0x6E20FC00 | (vm << 16) | (vn << 5) | vd);
+  }
+  void FRINTA_4S(VReg vd, VReg vn) { Emit(0x6E218800 | (vn << 5) | vd); }
+  // BSL: Vd = (Vd & Vn) | (~Vd & Vm)
+  void BSL_16B(VReg vd, VReg vn, VReg vm) {
+    Emit(0x6E601C00 | (vm << 16) | (vn << 5) | vd);
+  }
+  void DUP_16B(VReg vd, GReg rn) { Emit(0x4E010C00 | (rn << 5) | vd); }
+  void DUP_8H(VReg vd, GReg rn) { Emit(0x4E020C00 | (rn << 5) | vd); }
+  // UMAXV Sd, Vn.4S — unsigned maximum across lanes
+  void UMAXV_4S(VReg vd, VReg vn) { Emit(0x6EB0A800 | (vn << 5) | vd); }
+  // FMOV Vd.4S, #1.0
+  void FMOV_4S_one(VReg vd) { Emit(0x4F03F600 | vd); }
 
   // === System ===
   void NOP() { Emit(0xD503201F); }
@@ -1002,7 +1084,8 @@ class A64Asm {
   void Emit(uint32_t instr) { code_.push_back(instr); }
 
  private:
-  // Branch types: 0=B/BL(26-bit), 1=B.cond(19-bit), 2=CBZ/CBNZ(19-bit)
+  // Branch types: 0=B/BL(26-bit), 1=B.cond(19-bit), 2=CBZ/CBNZ(19-bit),
+  // 3=TBZ/TBNZ(14-bit)
   void EmitBranch(uint32_t base, Label* label, uint8_t type) {
     if (label->bound()) {
       int32_t rel = label->offset - static_cast<int32_t>(offset());
@@ -1017,6 +1100,9 @@ class A64Asm {
     if (type == 0) {
       // B/BL: 26-bit signed offset in words
       Emit(base | (((rel >> 2) & 0x3FFFFFF)));
+    } else if (type == 3) {
+      // TBZ/TBNZ: 14-bit signed offset in words
+      Emit(base | ((((rel >> 2) & 0x3FFF)) << 5));
     } else {
       // B.cond, CBZ, CBNZ: 19-bit signed offset in words
       Emit(base | ((((rel >> 2) & 0x7FFFF)) << 5));
@@ -1029,6 +1115,8 @@ class A64Asm {
     uint32_t base = code_[idx];
     if (type == 0) {
       code_[idx] = (base & ~0x3FFFFFF) | ((rel >> 2) & 0x3FFFFFF);
+    } else if (type == 3) {
+      code_[idx] = (base & ~(0x3FFF << 5)) | (((rel >> 2) & 0x3FFF) << 5);
     } else {
       code_[idx] = (base & ~(0x7FFFF << 5)) | (((rel >> 2) & 0x7FFFF) << 5);
     }

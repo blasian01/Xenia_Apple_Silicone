@@ -172,6 +172,8 @@ class HIRBuilder {
   Value* LoadVectorShr(Value* sh);
 
   Value* LoadClock();
+  void ClearFpStatus();
+  Value* LoadFpStatus();
 
   Value* AllocLocal(TypeName type);
   Value* LoadLocal(Value* slot);

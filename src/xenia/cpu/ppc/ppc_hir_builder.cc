@@ -179,6 +179,13 @@ bool PPCHIRBuilder::Emit(GuestFunction* function, uint32_t flags) {
     i.code = code;
     i.opcode = opcode;
     i.opcode_info = &opcode_info;
+#if XE_ARCH_ARM64
+    // Record-form FPU instructions (primary opcodes 59/63 with Rc set) report
+    // this instruction's exceptions in CR1, so start from a clean slate.
+    if (((code >> 26) == 59 || (code >> 26) == 63) && (code & 1)) {
+      ClearFpStatus();
+    }
+#endif
     if (!opcode_info.emit || opcode_info.emit(*this, i)) {
       auto& disasm_info = GetOpcodeDisasmInfo(opcode);
       XELOGE(
@@ -437,6 +444,15 @@ void PPCHIRBuilder::UpdateCR6(Value* src_value) {
   // TOOD(benvanik): trace CR.
 }
 
+void PPCHIRBuilder::UpdateCR6Bounds(Value* out_of_bounds) {
+  // vcmpbfp.: CR6 = 0 | 0 | all_in_bounds | 0
+  StoreContext(offsetof(PPCContext, cr6.cr6_1), LoadZeroInt8());
+  StoreContext(offsetof(PPCContext, cr6.cr6_3), LoadZeroInt8());
+  StoreContext(offsetof(PPCContext, cr6.cr6_all_equal), LoadZeroInt8());
+  StoreContext(offsetof(PPCContext, cr6.cr6_none_equal),
+               IsFalse(out_of_bounds));
+}
+
 Value* PPCHIRBuilder::LoadFPSCR() {
   return LoadContext(offsetof(PPCContext, fpscr), INT32_TYPE);
 }
@@ -450,7 +466,8 @@ void PPCHIRBuilder::StoreFPSCR(Value* value) {
   trace_reg.value = value;
 }
 
-void PPCHIRBuilder::UpdateFPSCR(Value* result, bool update_cr1) {
+void PPCHIRBuilder::UpdateFPSCR(Value* result, bool update_cr1,
+                                Value* status) {
   // TODO(benvanik): detect overflow and nan cases.
   // fx and vx are the most important.
   /*
@@ -465,6 +482,20 @@ void PPCHIRBuilder::UpdateFPSCR(Value* result, bool update_cr1) {
   Value* fex = LoadConstantInt8(0);
   Value* vx = LoadConstantInt8(0);
   Value* ox = LoadConstantInt8(0);
+#if XE_ARCH_ARM64
+  if (update_cr1) {
+    // Derive the summary bits from the host's exception flags accumulated
+    // since the ClearFpStatus emitted ahead of this instruction.
+    if (!status) {
+      status = LoadFpStatus();
+    }
+    fx = CompareNE(status, LoadConstantInt32(0));
+    vx = CompareNE(And(status, LoadConstantInt32(FP_STATUS_INVALID)),
+                   LoadConstantInt32(0));
+    ox = CompareNE(And(status, LoadConstantInt32(FP_STATUS_OVERFLOW)),
+                   LoadConstantInt32(0));
+  }
+#endif
 
   if (update_cr1) {
     // Store into the CR1 field.

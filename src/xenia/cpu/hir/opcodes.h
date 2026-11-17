@@ -117,6 +117,14 @@ inline bool IsPackOutSaturate(uint32_t flags) {
   return (flags & PACK_TYPE_OUT_SATURATE) == PACK_TYPE_OUT_SATURATE;
 }
 
+enum FpStatusFlags {
+  FP_STATUS_INVALID = 1 << 0,
+  FP_STATUS_DIVIDE_BY_ZERO = 1 << 1,
+  FP_STATUS_OVERFLOW = 1 << 2,
+  FP_STATUS_UNDERFLOW = 1 << 3,
+  FP_STATUS_INEXACT = 1 << 4,
+};
+
 enum Opcode {
   OPCODE_COMMENT,
   OPCODE_NOP,
@@ -293,6 +301,11 @@ enum Opcode {
   OPCODE_DELAY_EXECUTION,  // for db16cyc
   OPCODE_RESERVED_LOAD,
   OPCODE_RESERVED_STORE,
+  // Host floating-point exception status, used to derive FPSCR/CR1 bits for
+  // record-form FPU instructions. CLEAR resets the accumulated flags; LOAD
+  // returns them as FP_STATUS_* bits. Only implemented by the A64 backend.
+  OPCODE_CLEAR_FP_STATUS,
+  OPCODE_LOAD_FP_STATUS,
 
   __OPCODE_MAX_VALUE,  // Keep at end.
 };

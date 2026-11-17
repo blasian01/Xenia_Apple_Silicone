@@ -57,9 +57,12 @@ class PPCHIRBuilder : public hir::HIRBuilder {
   void UpdateCR(uint32_t n, Value* lhs, bool is_signed = true);
   void UpdateCR(uint32_t n, Value* lhs, Value* rhs, bool is_signed = true);
   void UpdateCR6(Value* src_value);
+  void UpdateCR6Bounds(Value* out_of_bounds);
   Value* LoadFPSCR();
   void StoreFPSCR(Value* value);
-  void UpdateFPSCR(Value* result, bool update_cr1);
+  // `status` optionally supplies the FP_STATUS_* exception flags (INT32) to
+  // report; when null they are read from the host (A64 only).
+  void UpdateFPSCR(Value* result, bool update_cr1, Value* status = nullptr);
   void CopyFPSCRToCR1();
   Value* LoadXER();
   void StoreXER(Value* value);

@@ -74,6 +74,16 @@ class A64Emitter {
   // Emit prologue/epilogue for a guest function
   void EmitPrologue(size_t stack_size);
   void EmitEpilogue(size_t stack_size);
+  // Scalar FPU vs VMX floating-point environment (see kA64BackendVmxModeBit).
+  // Emits a runtime check + FPCR switch unless the mode is statically known
+  // for the current block. Clobbers kScratch1/kScratch2.
+  enum class FpcrMode { Unknown, Fpu, Vmx };
+  void ChangeFpcrMode(FpcrMode mode);
+  void ForgetFpcrMode() { fpcr_mode_ = FpcrMode::Unknown; }
+  void AssumeFpcrMode(FpcrMode mode) { fpcr_mode_ = mode; }
+
+  // SP -= amount (allocate) or SP += amount, for amounts beyond 12 bits.
+  void AdjustStackPointer(size_t amount, bool allocate);
 
   FunctionDebugInfo* debug_info() const { return debug_info_; }
   size_t stack_size() const { return stack_size_; }
@@ -101,6 +111,7 @@ class A64Emitter {
   Arena source_map_arena_;
   std::vector<SourceMapEntry> source_map_entries_;
   size_t stack_size_ = 0;
+  FpcrMode fpcr_mode_ = FpcrMode::Unknown;
   uint32_t current_guest_function_ = 0;
 
   // HIR label id → A64 label for branch resolution

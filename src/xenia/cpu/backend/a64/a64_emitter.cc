@@ -3,6 +3,9 @@
  */
 #include "xenia/cpu/backend/a64/a64_emitter.h"
 
+#include <cstdio>
+#include <cstdlib>
+
 #include "xenia/base/logging.h"
 #include "xenia/cpu/backend/a64/a64_backend.h"
 #include "xenia/cpu/backend/a64/a64_code_cache.h"
@@ -76,13 +79,55 @@ void A64Emitter::BindLabel(uint32_t hir_label_id) {
   asm__.Bind(label);
 }
 
+void A64Emitter::ChangeFpcrMode(FpcrMode mode) {
+  if (mode == FpcrMode::Unknown || mode == fpcr_mode_) {
+    return;
+  }
+  const bool vmx = mode == FpcrMode::Vmx;
+  a64::Label done;
+  asm__.SUB(kScratch1, kContextReg,
+            static_cast<uint32_t>(sizeof(A64BackendContext)));
+  asm__.LDRw(kScratch2, kScratch1, offsetof(A64BackendContext, flags));
+  if (vmx) {
+    asm__.TBNZ(kScratch2, kA64BackendVmxModeBit, &done);
+  } else {
+    asm__.TBZ(kScratch2, kA64BackendVmxModeBit, &done);
+  }
+  asm__.MOVZ(X12, 1u << kA64BackendVmxModeBit);
+  asm__.EORw(kScratch2, kScratch2, X12);
+  asm__.STRw(kScratch2, kScratch1, offsetof(A64BackendContext, flags));
+  asm__.LDRw(kScratch2, kScratch1,
+             vmx ? offsetof(A64BackendContext, fpcr_vmx)
+                 : offsetof(A64BackendContext, fpcr_fpu));
+  asm__.MSR_FPCR(kScratch2);
+  asm__.Bind(&done);
+  fpcr_mode_ = mode;
+}
+
+void A64Emitter::AdjustStackPointer(size_t amount, bool allocate) {
+  // ADD/SUB immediates are 12 bits, optionally shifted left by 12.
+  assert((amount >> 24) == 0);
+  const uint32_t low = static_cast<uint32_t>(amount & 0xFFF);
+  const uint32_t high = static_cast<uint32_t>((amount >> 12) & 0xFFF);
+  if (allocate) {
+    if (high) asm__.SUB(SP, SP, high, true);
+    if (low) asm__.SUB(SP, SP, low);
+  } else {
+    if (low) asm__.ADD(SP, SP, low);
+    if (high) asm__.ADD(SP, SP, high, true);
+  }
+}
+
 void A64Emitter::EmitPrologue(size_t stack_size) {
   stack_size_ = stack_size;
   size_t total = StackLayout::HOST_FRAME_SAVE_SIZE +
                  StackLayout::GUEST_STACK_SIZE + stack_size;
   total = (total + 15) & ~15;  // 16-byte align
 
-  asm__.STP_pre(X29, X30, SP, -(int32_t)total);
+  // The frame can exceed the +/-504 byte reach of a pre-indexed STP once a
+  // function has spill slots, so move SP first and store the pair at [SP].
+  AdjustStackPointer(total, true);
+  asm__.STP(X29, X30, SP, 0);
   asm__.ADD(X29, SP, StackLayout::HOST_FRAME_SAVE_SIZE);
   asm__.STR(X2, X29, StackLayout::GUEST_RET_ADDR);
   asm__.MOVZ(kScratch0, 0);
@@ -125,7 +170,7 @@ void A64Emitter::EmitEpilogue(size_t stack_size) {
   asm__.LDP(X27, X28, X29, StackLayout::GUEST_GPR_SAVE + 0x30);
 
   asm__.LDP(X29, X30, SP, 0);
-  asm__.ADD(SP, SP, (int32_t)total);
+  AdjustStackPointer(total, false);
   asm__.RET();
 }
 
@@ -210,6 +255,20 @@ bool A64Emitter::Emit(GuestFunction* function, hir::HIRBuilder* builder,
                               func_info, function,
                               code_execute_address, code_write_address);
 
+  // Debug aid: XENIA_A64_DUMP_CODE=<dir> writes each function's raw machine
+  // code to <dir>/<guest address>.bin (disassemble with
+  // `llvm-objdump -D -b binary -m aarch64`).
+  static const char* dump_dir = std::getenv("XENIA_A64_DUMP_CODE");
+  if (dump_dir) {
+    char path[512];
+    std::snprintf(path, sizeof(path), "%s/%08X.bin", dump_dir,
+                  function->address());
+    if (FILE* f = std::fopen(path, "wb")) {
+      std::fwrite(asm__.code(), 1, asm__.code_size(), f);
+      std::fclose(f);
+    }
+  }
+
   *out_code_address = code_execute_address;
   *out_code_size = asm__.code_size();
   *out_source_map = source_map_entries_;
@@ -221,6 +280,8 @@ bool A64Emitter::EmitBody(hir::HIRBuilder* builder,
                           EmitFunctionInfo& func_info) {
   auto block = builder->first_block();
   while (block) {
+    // Control flow can arrive here with either FP environment active.
+    ForgetFpcrMode();
     // Bind all labels for this block
     auto hir_label = block->label_head;
     while (hir_label) {
@@ -236,6 +297,23 @@ bool A64Emitter::EmitBody(hir::HIRBuilder* builder,
         XELOGE("ARM64: Unimplemented HIR opcode: {}",
                GetOpcodeName(instr->GetOpcodeNum()));
         asm__.NOP();
+      }
+      // Callees (guest or host) may leave a different FP environment.
+      if (instr->opcode->flags & hir::OPCODE_FLAG_VOLATILE) {
+        ForgetFpcrMode();
+      }
+      switch (instr->GetOpcodeNum()) {
+        case hir::OPCODE_CALL:
+        case hir::OPCODE_CALL_TRUE:
+        case hir::OPCODE_CALL_INDIRECT:
+        case hir::OPCODE_CALL_INDIRECT_TRUE:
+        case hir::OPCODE_CALL_EXTERN:
+        case hir::OPCODE_TRAP:
+        case hir::OPCODE_TRAP_TRUE:
+          ForgetFpcrMode();
+          break;
+        default:
+          break;
       }
       instr = instr->next;
     }

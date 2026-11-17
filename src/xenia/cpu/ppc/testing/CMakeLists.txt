@@ -34,5 +34,9 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
   target_link_libraries(xenia-cpu-ppc-tests PRIVATE xenia-cpu-backend-x64)
 endif()
 
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64")
+  target_link_libraries(xenia-cpu-ppc-tests PRIVATE xenia-cpu-backend-a64)
+endif()
+
 xe_target_defaults(xenia-cpu-ppc-tests)
 add_test(NAME xenia-cpu-ppc-tests COMMAND xenia-cpu-ppc-tests)

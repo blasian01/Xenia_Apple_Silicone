@@ -9,6 +9,8 @@
 
 #include "xenia/cpu/ppc/ppc_emit-private.h"
 
+#include <initializer_list>
+
 #include "xenia/base/assert.h"
 #include "xenia/cpu/ppc/ppc_context.h"
 #include "xenia/cpu/ppc/ppc_hir_builder.h"
@@ -35,6 +37,79 @@ using xe::cpu::hir::Value;
 
 // Floating-point arithmetic (A-8)
 
+// True (INT8) if the FLOAT64 value is a denormal.
+static Value* IsDenormalF64(PPCHIRBuilder& f, Value* v) {
+  // Drop the sign; denormals are then 1..0x001FFFFFFFFFFFFE.
+  Value* magnitude = f.Shl(f.Cast(v, INT64_TYPE), 1);
+  return f.CompareULT(f.Sub(magnitude, f.LoadConstantUint64(1)),
+                      f.LoadConstantUint64(0x001FFFFFFFFFFFFEull));
+}
+
+static constexpr int32_t kAllFpStatus =
+    FP_STATUS_INVALID | FP_STATUS_DIVIDE_BY_ZERO | FP_STATUS_OVERFLOW |
+    FP_STATUS_UNDERFLOW | FP_STATUS_INEXACT;
+
+// The host exception flags for a record-form instruction, or null when they
+// aren't needed (or the backend can't supply them).
+static Value* LoadFpStatusIf(PPCHIRBuilder& f, bool rc) {
+#if XE_ARCH_ARM64
+  if (rc) {
+    return f.LoadFpStatus();
+  }
+#endif
+  return nullptr;
+}
+
+static Value* AnyDenormalF64(PPCHIRBuilder& f,
+                             std::initializer_list<Value*> operands) {
+  Value* any_denormal = nullptr;
+  for (Value* operand : operands) {
+    Value* d = IsDenormalF64(f, operand);
+    any_denormal = any_denormal ? f.Or(any_denormal, d) : d;
+  }
+  return any_denormal;
+}
+
+// Result of a single-precision add/sub/mul/fused op. The console produces the
+// default QNaN when any operand is a double-precision denormal (outside the
+// single format) and the result would otherwise be finite; in that case only
+// an invalid-operation exception is reported.
+static Value* SingleArithmeticResult(PPCHIRBuilder& f, Value* v,
+                                     std::initializer_list<Value*> operands,
+                                     bool rc, Value** out_status) {
+  Value* any_denormal = AnyDenormalF64(f, operands);
+  Value* finite = f.CompareULT(f.Shl(f.Cast(v, INT64_TYPE), 1),
+                               f.LoadConstantUint64(0xFFE0000000000000ull));
+  Value* default_nan =
+      f.Cast(f.LoadConstantUint64(0x7FF8000000000000ull), FLOAT64_TYPE);
+  Value* result =
+      f.Select(f.And(any_denormal, finite), default_nan, f.ToSingle(v));
+  Value* status = LoadFpStatusIf(f, rc);
+  if (status) {
+    status = f.And(status,
+                   f.Select(any_denormal, f.LoadConstantInt32(FP_STATUS_INVALID),
+                            f.LoadConstantInt32(kAllFpStatus)));
+  }
+  *out_status = status;
+  return result;
+}
+
+// Single-precision divide/sqrt: with a denormal operand the console returns
+// (and flags) the unrounded double-precision result.
+static Value* SingleUnroundedIfDenormal(PPCHIRBuilder& f, Value* v,
+                                        std::initializer_list<Value*> operands,
+                                        bool rc, Value** out_status) {
+  Value* any_denormal = AnyDenormalF64(f, operands);
+  Value* unrounded_status = LoadFpStatusIf(f, rc);
+  Value* rounded = f.ToSingle(v);
+  Value* status = LoadFpStatusIf(f, rc);
+  if (status) {
+    status = f.Select(any_denormal, unrounded_status, status);
+  }
+  *out_status = status;
+  return f.Select(any_denormal, v, rounded);
+}
+
 int InstrEmit_faddx(PPCHIRBuilder& f, const InstrData& i) {
   // frD <- (frA) + (frB)
   Value* v = f.Add(f.LoadFPR(i.A.FRA), f.LoadFPR(i.A.FRB));
@@ -45,10 +120,12 @@ int InstrEmit_faddx(PPCHIRBuilder& f, const InstrData& i) {
 
 int InstrEmit_faddsx(PPCHIRBuilder& f, const InstrData& i) {
   // frD <- (frA) + (frB)
-  Value* v = f.Add(f.LoadFPR(i.A.FRA), f.LoadFPR(i.A.FRB));
-  v = f.ToSingle(v);
+  Value* a = f.LoadFPR(i.A.FRA);
+  Value* b = f.LoadFPR(i.A.FRB);
+  Value* status;
+  Value* v = SingleArithmeticResult(f, f.Add(a, b), {a, b}, i.A.Rc, &status);
   f.StoreFPR(i.A.FRT, v);
-  f.UpdateFPSCR(v, i.A.Rc);
+  f.UpdateFPSCR(v, i.A.Rc, status);
   return 0;
 }
 
@@ -73,15 +150,19 @@ int InstrEmit_fdivsx(PPCHIRBuilder& f, const InstrData& i) {
 #if XE_PLATFORM_LINUX
   // TODO(has207): verify if this is needed on Windows
   // On Linux, fdivs needs to use A format fields instead of X format
-  Value* v = f.Div(f.LoadFPR(i.A.FRA), f.LoadFPR(i.A.FRB));
-  v = f.ToSingle(v);
+  Value* a = f.LoadFPR(i.A.FRA);
+  Value* b = f.LoadFPR(i.A.FRB);
+  Value* status;
+  Value* v = SingleUnroundedIfDenormal(f, f.Div(a, b), {a, b}, i.A.Rc, &status);
   f.StoreFPR(i.A.FRT, v);
-  f.UpdateFPSCR(v, i.A.Rc);
+  f.UpdateFPSCR(v, i.A.Rc, status);
 #else
-  Value* v = f.Div(f.LoadFPR(i.X.RA), f.LoadFPR(i.X.RB));
-  v = f.ToSingle(v);
+  Value* a = f.LoadFPR(i.X.RA);
+  Value* b = f.LoadFPR(i.X.RB);
+  Value* status;
+  Value* v = SingleUnroundedIfDenormal(f, f.Div(a, b), {a, b}, i.X.Rc, &status);
   f.StoreFPR(i.X.RT, v);
-  f.UpdateFPSCR(v, i.X.Rc);
+  f.UpdateFPSCR(v, i.X.Rc, status);
 #endif
   return 0;
 }
@@ -96,10 +177,12 @@ int InstrEmit_fmulx(PPCHIRBuilder& f, const InstrData& i) {
 
 int InstrEmit_fmulsx(PPCHIRBuilder& f, const InstrData& i) {
   // frD <- (frA) x (frC)
-  Value* v = f.Mul(f.LoadFPR(i.A.FRA), f.LoadFPR(i.A.FRC));
-  v = f.ToSingle(v);
+  Value* a = f.LoadFPR(i.A.FRA);
+  Value* c = f.LoadFPR(i.A.FRC);
+  Value* status;
+  Value* v = SingleArithmeticResult(f, f.Mul(a, c), {a, c}, i.A.Rc, &status);
   f.StoreFPR(i.A.FRT, v);
-  f.UpdateFPSCR(v, i.A.Rc);
+  f.UpdateFPSCR(v, i.A.Rc, status);
   return 0;
 }
 
@@ -108,10 +191,22 @@ int InstrEmit_fresx(PPCHIRBuilder& f, const InstrData& i) {
 
   // this actually does seem to require single precision, oddly
   // more research is needed
-  Value* v = f.Recip(f.Convert(f.LoadFPR(i.A.FRB), FLOAT32_TYPE));
+  Value* b = f.LoadFPR(i.A.FRB);
+  Value* v = f.Recip(f.Convert(b, FLOAT32_TYPE));
   v = f.Convert(v, FLOAT64_TYPE);  // f.ToSingle(v);
   f.StoreFPR(i.A.FRT, v);
-  f.UpdateFPSCR(v, i.A.Rc);
+  // The estimate reports invalid/zero-divide but not inexact, and a denormal
+  // operand overflows the single format.
+  Value* status = LoadFpStatusIf(f, i.A.Rc);
+  if (status) {
+    status = f.And(status, f.LoadConstantInt32(FP_STATUS_INVALID |
+                                               FP_STATUS_DIVIDE_BY_ZERO));
+    status = f.Or(status,
+                  f.Select(IsDenormalF64(f, b),
+                           f.LoadConstantInt32(FP_STATUS_OVERFLOW),
+                           f.LoadConstantInt32(0)));
+  }
+  f.UpdateFPSCR(v, i.A.Rc, status);
   return 0;
 }
 
@@ -134,10 +229,12 @@ int InstrEmit_fsubx(PPCHIRBuilder& f, const InstrData& i) {
 
 int InstrEmit_fsubsx(PPCHIRBuilder& f, const InstrData& i) {
   // frD <- (frA) - (frB)
-  Value* v = f.Sub(f.LoadFPR(i.A.FRA), f.LoadFPR(i.A.FRB));
-  v = f.ToSingle(v);
+  Value* a = f.LoadFPR(i.A.FRA);
+  Value* b = f.LoadFPR(i.A.FRB);
+  Value* status;
+  Value* v = SingleArithmeticResult(f, f.Sub(a, b), {a, b}, i.A.Rc, &status);
   f.StoreFPR(i.A.FRT, v);
-  f.UpdateFPSCR(v, i.A.Rc);
+  f.UpdateFPSCR(v, i.A.Rc, status);
   return 0;
 }
 
@@ -148,17 +245,21 @@ int InstrEmit_fselx(PPCHIRBuilder& f, const InstrData& i) {
   Value* ge = f.CompareSGE(f.LoadFPR(i.A.FRA), f.LoadZeroFloat64());
   Value* v = f.Select(ge, f.LoadFPR(i.A.FRC), f.LoadFPR(i.A.FRB));
   f.StoreFPR(i.A.FRT, v);
-  f.UpdateFPSCR(v, i.A.Rc);
+  // fsel raises no exceptions (the host compare above may, on a NaN).
+  f.UpdateFPSCR(v, i.A.Rc,
+                LoadFpStatusIf(f, i.A.Rc) ? f.LoadConstantInt32(0) : nullptr);
   return 0;
 }
 static int InstrEmit_fsqrt(PPCHIRBuilder& f, const InstrData& i, bool single) {
   // frD <- sqrt(frB)
-  Value* v = f.Sqrt(f.LoadFPR(i.A.FRB));
+  Value* b = f.LoadFPR(i.A.FRB);
+  Value* v = f.Sqrt(b);
+  Value* status = nullptr;
   if (single) {
-    v = f.ToSingle(v);
+    v = SingleUnroundedIfDenormal(f, v, {b}, i.A.Rc, &status);
   }
   f.StoreFPR(i.A.FRT, v);
-  f.UpdateFPSCR(v, i.A.Rc);
+  f.UpdateFPSCR(v, i.A.Rc, status);
   return 0;
 }
 int InstrEmit_fsqrtx(PPCHIRBuilder& f, const InstrData& i) {
@@ -173,13 +274,16 @@ int InstrEmit_fsqrtsx(PPCHIRBuilder& f, const InstrData& i) {
 
 static int InstrEmit_fmadd(PPCHIRBuilder& f, const InstrData& i, bool single) {
   // frD <- (frA x frC) + frB
-  Value* v =
-      f.MulAdd(f.LoadFPR(i.A.FRA), f.LoadFPR(i.A.FRC), f.LoadFPR(i.A.FRB));
+  Value* a = f.LoadFPR(i.A.FRA);
+  Value* c = f.LoadFPR(i.A.FRC);
+  Value* b = f.LoadFPR(i.A.FRB);
+  Value* v = f.MulAdd(a, c, b);
+  Value* status = nullptr;
   if (single) {
-    v = f.ToSingle(v);
+    v = SingleArithmeticResult(f, v, {a, c, b}, i.A.Rc, &status);
   }
   f.StoreFPR(i.A.FRT, v);
-  f.UpdateFPSCR(v, i.A.Rc);
+  f.UpdateFPSCR(v, i.A.Rc, status);
   return 0;
 }
 
@@ -193,13 +297,16 @@ int InstrEmit_fmaddsx(PPCHIRBuilder& f, const InstrData& i) {
 
 static int InstrEmit_fmsub(PPCHIRBuilder& f, const InstrData& i, bool single) {
   // frD <- (frA x frC) - frB
-  Value* v =
-      f.MulSub(f.LoadFPR(i.A.FRA), f.LoadFPR(i.A.FRC), f.LoadFPR(i.A.FRB));
+  Value* a = f.LoadFPR(i.A.FRA);
+  Value* c = f.LoadFPR(i.A.FRC);
+  Value* b = f.LoadFPR(i.A.FRB);
+  Value* v = f.MulSub(a, c, b);
+  Value* status = nullptr;
   if (single) {
-    v = f.ToSingle(v);
+    v = SingleArithmeticResult(f, v, {a, c, b}, i.A.Rc, &status);
   }
   f.StoreFPR(i.A.FRT, v);
-  f.UpdateFPSCR(v, i.A.Rc);
+  f.UpdateFPSCR(v, i.A.Rc, status);
   return 0;
 }
 int InstrEmit_fmsubx(PPCHIRBuilder& f, const InstrData& i) {
@@ -221,11 +328,14 @@ int InstrEmit_fnmaddx(PPCHIRBuilder& f, const InstrData& i) {
 
 int InstrEmit_fnmaddsx(PPCHIRBuilder& f, const InstrData& i) {
   // frD <- -([frA x frC] + frB)
-  Value* v = f.Neg(
-      f.MulAdd(f.LoadFPR(i.A.FRA), f.LoadFPR(i.A.FRC), f.LoadFPR(i.A.FRB)));
-  v = f.ToSingle(v);
+  Value* a = f.LoadFPR(i.A.FRA);
+  Value* c = f.LoadFPR(i.A.FRC);
+  Value* b = f.LoadFPR(i.A.FRB);
+  Value* status;
+  Value* v = SingleArithmeticResult(f, f.Neg(f.MulAdd(a, c, b)), {a, c, b},
+                                    i.A.Rc, &status);
   f.StoreFPR(i.A.FRT, v);
-  f.UpdateFPSCR(v, i.A.Rc);
+  f.UpdateFPSCR(v, i.A.Rc, status);
   return 0;
 }
 
@@ -240,11 +350,14 @@ int InstrEmit_fnmsubx(PPCHIRBuilder& f, const InstrData& i) {
 
 int InstrEmit_fnmsubsx(PPCHIRBuilder& f, const InstrData& i) {
   // frD <- -([frA x frC] - frB)
-  Value* v = f.Neg(
-      f.MulSub(f.LoadFPR(i.A.FRA), f.LoadFPR(i.A.FRC), f.LoadFPR(i.A.FRB)));
-  v = f.ToSingle(v);
+  Value* a = f.LoadFPR(i.A.FRA);
+  Value* c = f.LoadFPR(i.A.FRC);
+  Value* b = f.LoadFPR(i.A.FRB);
+  Value* status;
+  Value* v = SingleArithmeticResult(f, f.Neg(f.MulSub(a, c, b)), {a, c, b},
+                                    i.A.Rc, &status);
   f.StoreFPR(i.A.FRT, v);
-  f.UpdateFPSCR(v, i.A.Rc);
+  f.UpdateFPSCR(v, i.A.Rc, status);
   return 0;
 }
 
@@ -272,7 +385,11 @@ int InstrEmit_fctidxx_(PPCHIRBuilder& f, const InstrData& i,
   f.MarkLabel(isnan);
   v = f.Cast(f.LoadConstantUint64(0x8000000000000000u), FLOAT64_TYPE);
   f.StoreFPR(i.X.RT, v);
-  f.UpdateFPSCR(v, i.X.Rc);
+  // Converting a NaN is an invalid operation.
+  f.UpdateFPSCR(v, i.X.Rc,
+                LoadFpStatusIf(f, i.X.Rc)
+                    ? f.LoadConstantInt32(FP_STATUS_INVALID)
+                    : nullptr);
   f.MarkLabel(end);
   return 0;
 }
@@ -298,9 +415,12 @@ int InstrEmit_fctiwxx_(PPCHIRBuilder& f, const InstrData& i,
   f.UpdateFPSCR(v, i.X.Rc);
   f.Branch(end);
   f.MarkLabel(isnan);
-  v = f.Cast(f.LoadConstantUint32(0x80000000u), FLOAT64_TYPE);
+  v = f.Cast(f.LoadConstantUint64(0xFFFFFFFF80000000ull), FLOAT64_TYPE);
   f.StoreFPR(i.X.RT, v);
-  f.UpdateFPSCR(v, i.X.Rc);
+  f.UpdateFPSCR(v, i.X.Rc,
+                LoadFpStatusIf(f, i.X.Rc)
+                    ? f.LoadConstantInt32(FP_STATUS_INVALID)
+                    : nullptr);
   f.MarkLabel(end);
   return 0;
 }

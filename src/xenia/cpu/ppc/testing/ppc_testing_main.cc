@@ -28,6 +28,8 @@
 
 #if XE_ARCH_AMD64
 #include "xenia/cpu/backend/x64/x64_backend.h"
+#elif XE_ARCH_ARM64
+#include "xenia/cpu/backend/a64/a64_backend.h"
 #endif  // XE_ARCH
 
 #if XE_COMPILER_MSVC
@@ -252,10 +254,17 @@ class TestRunner {
         if (!backend) {
 #if XE_ARCH_AMD64
           backend.reset(new xe::cpu::backend::x64::X64Backend());
+#elif XE_ARCH_ARM64
+          backend.reset(new xe::cpu::backend::a64::A64Backend());
 #endif  // XE_ARCH
         }
       }
     }
+#if XE_ARCH_ARM64
+    if (!backend) {
+      backend.reset(new xe::cpu::backend::a64::A64Backend());
+    }
+#endif
 
     // Setup a fresh processor.
     processor_.reset(new Processor(memory_.get(), nullptr));
@@ -484,6 +493,9 @@ TestResult RunTestInChildProcess(TestSuite& test_suite, TestCase& test_case) {
   }
 
   if (pid == 0) {
+    // A miscompiled test can spin forever; SIGALRM turns that into a crash
+    // report instead of hanging the whole run.
+    alarm(20);
     // Child process - create a fresh TestRunner to avoid inherited state issues
     // Use a scope block to ensure destructors run before _exit(),
     // otherwise shared memory objects in /dev/shm are never cleaned up.

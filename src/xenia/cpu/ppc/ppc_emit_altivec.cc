@@ -563,7 +563,9 @@ int InstrEmit_vcmpbfp_(PPCHIRBuilder& f, const InstrData& i, uint32_t vd,
   // if vA or vB are NaN, the 2 high-order bits are set (0xC0000000)
   Value* va_value = f.LoadVR(va);
   Value* vb_value = f.LoadVR(vb);
-  Value* gt = f.VectorCompareSGT(va_value, vb_value, FLOAT32_TYPE);
+  // Bit 0: !(a <= b); bit 1: !(a >= -b). Both are set for unordered lanes, so
+  // these must be negated ordered compares rather than a > b / a < -b.
+  Value* gt = f.Not(f.VectorCompareSGE(vb_value, va_value, FLOAT32_TYPE));
   Value* lt =
       f.Not(f.VectorCompareSGE(va_value, f.Neg(vb_value), FLOAT32_TYPE));
   Value* v =
@@ -575,8 +577,7 @@ int InstrEmit_vcmpbfp_(PPCHIRBuilder& f, const InstrData& i, uint32_t vd,
   if (rc) {
     // CR0:4 = 0; CR0:5 = VT == 0; CR0:6 = CR0:7 = 0;
     // If all of the elements are within bounds, CR6[2] is set
-    // FIXME: Does not affect CR6[0], but the following function does.
-    f.UpdateCR6(f.Or(gt, lt));
+    f.UpdateCR6Bounds(f.Or(gt, lt));
   }
   return 0;
 }
@@ -1404,8 +1405,20 @@ int InstrEmit_vsl(PPCHIRBuilder& f, const InstrData& i) {
   Value* vb = f.LoadVR(i.VX.VB);
 
   AssertShiftElementsOk(f, vb);
-  Value* v =
-      f.Shl(va, f.And(f.Extract(vb, 15, INT8_TYPE), f.LoadConstantInt8(0b111)));
+  // The shift count is only defined when all 16 bytes of VB agree. The
+  // hardware actually shifts each byte by its own count, pulling the vacated
+  // bits from the next byte:
+  //   out[n] = (va[n] << s[n]) | (va[n + 1] >> (8 - s[n])),  s[n] = vb[n] & 7
+  // which is the plain 128-bit shift whenever the counts do agree.
+  Value* next = f.Permute(
+      f.LoadConstantVec128(vec128b(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13,
+                                   14, 15, 16)),
+      va, f.LoadZeroVec128(), INT8_TYPE);
+  // (x >> 1) >> (7 - s) == x >> (8 - s) without a shift by 8; ~vb & 7 == 7 - s.
+  Value* carry = f.VectorShr(
+      f.VectorShr(next, f.LoadConstantVec128(vec128b(1)), INT8_TYPE), f.Not(vb),
+      INT8_TYPE);
+  Value* v = f.Or(f.VectorShl(va, vb, INT8_TYPE), carry);
   f.StoreVR(i.VX.VD, v);
   return 0;
 }
@@ -1590,8 +1603,17 @@ int InstrEmit_vsr(PPCHIRBuilder& f, const InstrData& i) {
 
   AssertShiftElementsOk(f, vb);
 
-  Value* v =
-      f.Shr(va, f.And(f.Extract(vb, 15, INT8_TYPE), f.LoadConstantInt8(0b111)));
+  // See InstrEmit_vsl: each byte shifts by its own count, taking the vacated
+  // bits from the previous byte:
+  //   out[n] = (va[n] >> s[n]) | (va[n - 1] << (8 - s[n])),  s[n] = vb[n] & 7
+  Value* prev = f.Permute(
+      f.LoadConstantVec128(vec128b(16, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
+                                   13, 14)),
+      va, f.LoadZeroVec128(), INT8_TYPE);
+  Value* carry = f.VectorShl(
+      f.VectorShl(prev, f.LoadConstantVec128(vec128b(1)), INT8_TYPE), f.Not(vb),
+      INT8_TYPE);
+  Value* v = f.Or(f.VectorShr(va, vb, INT8_TYPE), carry);
   f.StoreVR(i.VX.VD, v);
   return 0;
 }
