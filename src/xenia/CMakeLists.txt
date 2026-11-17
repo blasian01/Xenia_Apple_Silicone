@@ -52,5 +52,8 @@ if(WIN32)
   add_subdirectory(ui/d3d12)
 endif()
 
-# macOS: Vulkan + SDL modules are already included above.
-# No macOS-only subdirectories needed yet.
+# macOS: Vulkan + SDL modules are already included above. The keyboard input
+# driver tracks key state from window events there, so it's portable.
+if(APPLE)
+  add_subdirectory(hid/winkey)
+endif()

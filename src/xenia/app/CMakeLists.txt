@@ -110,6 +110,7 @@ if(WIN32)
   )
 elseif(APPLE)
   target_link_libraries(xenia-app PRIVATE
+    xenia-hid-winkey
     SDL2
     "-framework Cocoa"
     "-framework Metal"

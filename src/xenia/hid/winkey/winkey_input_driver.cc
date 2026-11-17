@@ -9,8 +9,14 @@
 
 #include "xenia/hid/winkey/winkey_input_driver.h"
 
+#include <climits>
+#include <cstring>
+
 #include "xenia/base/logging.h"
+#include "xenia/base/platform.h"
+#if XE_PLATFORM_WIN32
 #include "xenia/base/platform_win.h"
+#endif  // XE_PLATFORM_WIN32
 #include "xenia/hid/hid_flags.h"
 #include "xenia/hid/input_system.h"
 #include "xenia/ui/virtual_key.h"
@@ -25,7 +31,15 @@
 #include "winkey_binding_table.inc"
 #undef XE_HID_WINKEY_BINDING
 
-DEFINE_int32(keyboard_mode, 0,
+// On macOS the keyboard is on by default: it's the only input available
+// without a controller, and a connected controller (the SDL driver is queried
+// first) still takes precedence over it.
+#if XE_PLATFORM_MAC
+#define XE_HID_KEYBOARD_MODE_DEFAULT 1
+#else
+#define XE_HID_KEYBOARD_MODE_DEFAULT 0
+#endif
+DEFINE_int32(keyboard_mode, XE_HID_KEYBOARD_MODE_DEFAULT,
              "Allows user do specify keyboard working mode. Possible values: 0 "
              "- Disabled, 1 - Enabled, 2 - Passthrough. Passthrough requires "
              "controller being connected!",
@@ -55,17 +69,46 @@ bool static IsKeyboardForUserEnabled(uint32_t user_index) {
   return cvars::keyboard_user_index == user_index;
 }
 
-bool __inline IsKeyToggled(uint8_t key) {
-  return (GetKeyState(key) & 0x1) == 0x1;
+#if XE_PLATFORM_WIN32
+bool WinKeyInputDriver::IsKeyToggled(ui::VirtualKey virtual_key) const {
+  return (GetKeyState(static_cast<uint8_t>(virtual_key)) & 0x1) == 0x1;
 }
 
-bool __inline IsKeyDown(uint8_t key) {
-  return (GetAsyncKeyState(key) & 0x8000) == 0x8000;
+bool WinKeyInputDriver::IsKeyDown(ui::VirtualKey virtual_key) const {
+  return (GetAsyncKeyState(static_cast<uint8_t>(virtual_key)) & 0x8000) ==
+         0x8000;
+}
+#else
+// No global key state query on other platforms - the state is tracked from
+// the window's key events instead (see OnKey).
+bool WinKeyInputDriver::IsKeyToggled(ui::VirtualKey virtual_key) const {
+  // The windowing layer reports lock keys as held down while the lock is on.
+  return IsKeyDown(virtual_key);
 }
 
-bool __inline IsKeyDown(ui::VirtualKey virtual_key) {
-  return IsKeyDown(static_cast<uint8_t>(virtual_key));
+bool WinKeyInputDriver::IsKeyDown(ui::VirtualKey virtual_key) const {
+  auto is_down = [this](ui::VirtualKey key) {
+    return key_down_[static_cast<uint16_t>(key) & 0xFF].load(
+        std::memory_order_relaxed);
+  };
+  switch (virtual_key) {
+    case ui::VirtualKey::kShift:
+      return is_down(ui::VirtualKey::kShift) ||
+             is_down(ui::VirtualKey::kLShift) ||
+             is_down(ui::VirtualKey::kRShift);
+    case ui::VirtualKey::kControl:
+      return is_down(ui::VirtualKey::kControl) ||
+             is_down(ui::VirtualKey::kLControl) ||
+             is_down(ui::VirtualKey::kRControl);
+    case ui::VirtualKey::kMenu:
+      return is_down(ui::VirtualKey::kMenu) ||
+             is_down(ui::VirtualKey::kLMenu) ||
+             is_down(ui::VirtualKey::kRMenu);
+    default:
+      return is_down(virtual_key);
+  }
 }
+#endif  // XE_PLATFORM_WIN32
 
 void WinKeyInputDriver::ParseKeyBinding(ui::VirtualKey output_key,
                                         const std::string_view description,
@@ -169,8 +212,18 @@ X_RESULT WinKeyInputDriver::GetState(uint32_t user_index,
   int16_t thumb_rx = 0;
   int16_t thumb_ry = 0;
 
+#if !XE_PLATFORM_WIN32
+  if (!window()->HasFocus()) {
+    // Key-up events are not delivered to an unfocused window.
+    for (auto& key_down : key_down_) {
+      key_down.store(false, std::memory_order_relaxed);
+    }
+  }
+#endif  // !XE_PLATFORM_WIN32
+
   if (window()->HasFocus()) {
-    bool capital = IsKeyToggled(VK_CAPITAL) || IsKeyDown(VK_SHIFT);
+    bool capital = IsKeyToggled(ui::VirtualKey::kCapital) ||
+                   IsKeyDown(ui::VirtualKey::kShift);
     for (const KeyBinding& b : key_bindings_) {
       if (((b.lowercase == b.uppercase) || (b.lowercase && !capital) ||
            (b.uppercase && capital)) &&
@@ -266,7 +319,7 @@ X_RESULT WinKeyInputDriver::GetState(uint32_t user_index,
   out_state->gamepad.thumb_ry = thumb_ry;
 
   if (IsPassthroughEnabled()) {
-    memset(out_state, 0, sizeof(out_state));
+    std::memset(out_state, 0, sizeof(*out_state));
   }
 
   return X_ERROR_SUCCESS;
@@ -305,7 +358,8 @@ X_RESULT WinKeyInputDriver::GetKeystroke(uint32_t user_index, uint32_t flags,
   uint16_t keystroke_flags = 0;
   uint8_t hid_code = 0;
 
-  bool capital = IsKeyToggled(VK_CAPITAL) || IsKeyDown(VK_SHIFT);
+  bool capital = IsKeyToggled(ui::VirtualKey::kCapital) ||
+                   IsKeyDown(ui::VirtualKey::kShift);
 
   if (!IsPassthroughEnabled()) {
     if (IsKeyboardForUserEnabled(user_index)) {
@@ -324,11 +378,11 @@ X_RESULT WinKeyInputDriver::GetKeystroke(uint32_t user_index, uint32_t flags,
       keystroke_flags |= 0x0008;  // XINPUT_KEYSTROKE_SHIFT
     }
 
-    if (IsKeyToggled(VK_CONTROL)) {
+    if (IsKeyToggled(ui::VirtualKey::kControl)) {
       keystroke_flags |= 0x0010;  // XINPUT_KEYSTROKE_CTRL
     }
 
-    if (IsKeyToggled(VK_MENU)) {
+    if (IsKeyToggled(ui::VirtualKey::kMenu)) {
       keystroke_flags |= 0x0020;  // XINPUT_KEYSTROKE_ALT
     }
   }
@@ -343,6 +397,7 @@ X_RESULT WinKeyInputDriver::GetKeystroke(uint32_t user_index, uint32_t flags,
       keystroke_flags |= 0x0002;  // XINPUT_KEYSTROKE_KEYUP
     }
 
+#if XE_PLATFORM_WIN32
     if (IsPassthroughEnabled()) {
       if (GetKeyboardState(key_map_)) {
         WCHAR buf;
@@ -353,6 +408,7 @@ X_RESULT WinKeyInputDriver::GetKeystroke(uint32_t user_index, uint32_t flags,
         }
       }
     }
+#endif  // XE_PLATFORM_WIN32
 
     result = X_ERROR_SUCCESS;
   }
@@ -378,6 +434,11 @@ void WinKeyInputDriver::WinKeyWindowInputListener::OnKeyUp(ui::KeyEvent& e) {
 }
 
 void WinKeyInputDriver::OnKey(ui::KeyEvent& e, bool is_down) {
+#if !XE_PLATFORM_WIN32
+  key_down_[static_cast<uint16_t>(e.virtual_key()) & 0xFF].store(
+      is_down, std::memory_order_relaxed);
+#endif  // !XE_PLATFORM_WIN32
+
   if (static_cast<KeyboardMode>(cvars::keyboard_mode) ==
       KeyboardMode::Disabled) {
     return;

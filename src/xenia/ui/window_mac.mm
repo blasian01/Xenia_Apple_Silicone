@@ -554,6 +554,19 @@ VirtualKey MacWindow::TranslateSDLKey(const SDL_Keysym& keysym) {
     case SDLK_PAGEDOWN: return VirtualKey::kNext;
     case SDLK_INSERT: return VirtualKey::kInsert;
     case SDLK_PAUSE: return VirtualKey::kPause;
+    // Punctuation: SDL keycodes are ASCII, which collides with unrelated
+    // virtual keys (the apostrophe is 0x27, the right arrow's code).
+    case SDLK_SEMICOLON: return VirtualKey::kOem1;
+    case SDLK_EQUALS: return VirtualKey::kOemPlus;
+    case SDLK_COMMA: return VirtualKey::kOemComma;
+    case SDLK_MINUS: return VirtualKey::kOemMinus;
+    case SDLK_PERIOD: return VirtualKey::kOemPeriod;
+    case SDLK_SLASH: return VirtualKey::kOem2;
+    case SDLK_BACKQUOTE: return VirtualKey::kOem3;
+    case SDLK_LEFTBRACKET: return VirtualKey::kOem4;
+    case SDLK_BACKSLASH: return VirtualKey::kOem5;
+    case SDLK_RIGHTBRACKET: return VirtualKey::kOem6;
+    case SDLK_QUOTE: return VirtualKey::kOem7;
     default:
       return VirtualKey(keysym.sym);
   }

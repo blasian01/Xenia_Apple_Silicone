@@ -10,6 +10,8 @@
 #ifndef XENIA_HID_WINKEY_WINKEY_INPUT_DRIVER_H_
 #define XENIA_HID_WINKEY_WINKEY_INPUT_DRIVER_H_
 
+#include <array>
+#include <atomic>
 #include <queue>
 
 #include "xenia/base/mutex.h"
@@ -70,12 +72,18 @@ class WinKeyInputDriver final : public InputDriver {
 
   void OnKey(ui::KeyEvent& e, bool is_down);
 
+  bool IsKeyToggled(ui::VirtualKey virtual_key) const;
+  bool IsKeyDown(ui::VirtualKey virtual_key) const;
+
   WinKeyWindowInputListener window_input_listener_;
 
   xe::global_critical_region global_critical_region_;
   std::queue<KeyEvent> key_events_;
   std::vector<KeyBinding> key_bindings_;
   uint8_t key_map_[256];
+  // Key state tracked from window events where the platform has no global
+  // key state query (everything but Windows).
+  std::array<std::atomic<bool>, 256> key_down_ = {};
   uint32_t packet_number_ = 1;
 };
 
