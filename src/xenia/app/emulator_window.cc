@@ -18,6 +18,7 @@
 #include "xenia/base/assert.h"
 #include "xenia/base/clock.h"
 #include "xenia/base/cvar.h"
+#include "xenia/config.h"
 #include "xenia/base/debugging.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/platform.h"
@@ -148,6 +149,12 @@ DEFINE_uint32(auto_screenshot_interval, 0,
               "seconds while a title is running (0 = disabled).",
               "General");
 
+DEFINE_string(auto_create_profile, "",
+              "If no profile is signed in when the emulator starts, sign in "
+              "the first existing profile, or create one with this gamertag "
+              "when there is none, instead of asking.",
+              "General");
+
 DEFINE_bool(disable_doubleclick_fullscreen, false,
             "Allows the user to disable the behavior where a fast double-click "
             "causes Xenia to enter fullscreen mode.",
@@ -271,10 +278,25 @@ void EmulatorWindow::OnEmulatorInitialized() {
       }
     }).detach();
   }
-  if (!emulator_->kernel_state()
-           ->xam_state()
-           ->profile_manager()
-           ->GetAccountCount()) {
+  auto profile_manager =
+      emulator_->kernel_state()->xam_state()->profile_manager();
+  if (!cvars::auto_create_profile.empty() &&
+      !profile_manager->IsAnyProfileSignedIn()) {
+    if (profile_manager->GetAccountCount()) {
+      profile_manager->Login(profile_manager->GetAccounts()->begin()->first);
+    } else if (profile_manager->CreateProfile(cvars::auto_create_profile,
+                                              true)) {
+      XELOGI("Created profile \"{}\" (auto_create_profile)",
+             cvars::auto_create_profile);
+    } else {
+      XELOGE("Failed to create profile \"{}\" (auto_create_profile)",
+             cvars::auto_create_profile);
+    }
+    // Remember the signed-in profile even if the emulator doesn't exit
+    // cleanly.
+    config::SaveConfig();
+  }
+  if (!profile_manager->GetAccountCount()) {
     new NoProfileDialog(imgui_drawer_.get(), this);
     disable_hotkeys_ = true;
   }

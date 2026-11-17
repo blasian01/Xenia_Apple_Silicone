@@ -9,7 +9,10 @@
 
 #include "xenia/kernel/xam/xam_module.h"
 
+#include "xenia/base/filesystem.h"
 #include "xenia/base/math.h"
+#include "xenia/base/platform.h"
+#include "xenia/emulator.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/xam/xam_private.h"
 
@@ -62,8 +65,22 @@ void XamModule::RegisterExportTable(xe::cpu::ExportResolver* export_resolver) {
 
 XamModule::~XamModule() {}
 
+// The working directory isn't reliably writable (it's "/" for an app bundle
+// started from Finder), so on macOS the file lives in the storage root.
+static std::filesystem::path GetLoaderDataPath(KernelState* kernel_state) {
+#if XE_PLATFORM_MAC
+  if (kernel_state && kernel_state->emulator()) {
+    return kernel_state->emulator()->storage_root() /
+           kXamModuleLoaderDataFileName;
+  }
+#endif  // XE_PLATFORM_MAC
+  return std::filesystem::path(kXamModuleLoaderDataFileName);
+}
+
 void XamModule::LoadLoaderData() {
-  FILE* file = xe::filesystem::OpenFile(kXamModuleLoaderDataFileName, "rb");
+  const std::filesystem::path loader_data_path =
+      GetLoaderDataPath(kernel_state_);
+  FILE* file = xe::filesystem::OpenFile(loader_data_path, "rb");
 
   if (!file) {
     loader_data_.launch_data_present = false;
@@ -97,11 +114,13 @@ void XamModule::LoadLoaderData() {
 
   fclose(file);
   // We read launch data. Let's remove it till next request.
-  std::filesystem::remove(kXamModuleLoaderDataFileName);
+  std::error_code error_code;
+  std::filesystem::remove(loader_data_path, error_code);
 }
 
 void XamModule::SaveLoaderData() {
-  FILE* file = xe::filesystem::OpenFile(kXamModuleLoaderDataFileName, "wb");
+  FILE* file =
+      xe::filesystem::OpenFile(GetLoaderDataPath(kernel_state_), "wb");
 
   if (!file) {
     return;

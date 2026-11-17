@@ -1090,6 +1090,11 @@ uint32_t Processor::StepToGuestSafePoint(uint32_t thread_id, bool ignore_host) {
         "Processor::StepToSafePoint(): target thread is the calling thread!");
     return 0;
   }
+  if (!stack_walker_) {
+    // No stack walker on this platform (only Windows has one), so the thread
+    // can't be stepped anywhere.
+    return 0;
+  }
   auto thread_info = QueryThreadDebugInfo(thread_id);
   auto thread = thread_info->thread;
 

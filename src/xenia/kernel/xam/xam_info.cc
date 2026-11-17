@@ -10,6 +10,7 @@
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/string_util.h"
+#include "xenia/config.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/title_id_utils.h"
 #include "xenia/kernel/user_module.h"
@@ -30,6 +31,16 @@
 
 #include "third_party/fmt/include/fmt/format.h"
 #include "third_party/fmt/include/fmt/xchar.h"
+
+#if XE_PLATFORM_MAC
+#include <crt_externs.h>
+#include <fcntl.h>
+#include <mach-o/dyld.h>
+#include <unistd.h>
+
+#include <cstring>
+#include <vector>
+#endif  // XE_PLATFORM_MAC
 
 DEFINE_int32(avpack, 8,
              "Video modes\n"
@@ -386,6 +397,46 @@ dword_result_t XamLoaderGetLaunchData_entry(lpvoid_t buffer_ptr,
 }
 DECLARE_XAM_EXPORT1(XamLoaderGetLaunchData, kNone, kSketchy);
 
+#if XE_PLATFORM_MAC
+// Titles can't be torn down and restarted in-process here (stopping guest
+// threads at a safe point needs the stack walker, which only exists on
+// Windows), so restart the whole emulator instead. The loader data saved by
+// the caller makes the new instance boot straight into the requested
+// executable. Only returns if the restart failed.
+static void RestartEmulatorForTitleLaunch() {
+  char executable_path[4096];
+  uint32_t executable_path_size = sizeof(executable_path);
+  if (_NSGetExecutablePath(executable_path, &executable_path_size) != 0) {
+    return;
+  }
+  // Keep the options, drop the positional target: the saved loader data
+  // names what to run.
+  int argc = *_NSGetArgc();
+  char** argv = *_NSGetArgv();
+  std::vector<char*> new_argv;
+  new_argv.push_back(executable_path);
+  for (int i = 1; i < argc; ++i) {
+    if (argv[i][0] == '-' && std::strncmp(argv[i], "--target", 8) != 0) {
+      new_argv.push_back(argv[i]);
+    }
+  }
+  new_argv.push_back(nullptr);
+  XELOGI("XamLoaderLaunchTitle: restarting the emulator to launch the title");
+  // Settings changed during this session (the signed-in profiles, for one)
+  // are normally written on exit.
+  config::SaveConfig();
+  xe::ShutdownLogging();
+  // Don't leak this instance's files and sockets into the new one.
+  for (int fd = 3, fd_count = getdtablesize(); fd < fd_count; ++fd) {
+    int fd_flags = fcntl(fd, F_GETFD);
+    if (fd_flags != -1) {
+      fcntl(fd, F_SETFD, fd_flags | FD_CLOEXEC);
+    }
+  }
+  execv(executable_path, new_argv.data());
+}
+#endif  // XE_PLATFORM_MAC
+
 void XamLoaderLaunchTitle_entry(lpstring_t raw_name_ptr, dword_t flags) {
   auto xam = kernel_state()->GetKernelModule<XamModule>("xam.xex");
 
@@ -397,6 +448,10 @@ void XamLoaderLaunchTitle_entry(lpstring_t raw_name_ptr, dword_t flags) {
     loader_data.launch_path = xe::path_to_utf8(raw_name_ptr.value());
     loader_data.launch_data_present = true;
     xam->SaveLoaderData();
+
+#if XE_PLATFORM_MAC
+    RestartEmulatorForTitleLaunch();
+#endif  // XE_PLATFORM_MAC
 
     auto display_window = kernel_state()->emulator()->display_window();
     auto imgui_drawer = kernel_state()->emulator()->imgui_drawer();

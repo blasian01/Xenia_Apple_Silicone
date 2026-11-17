@@ -11,6 +11,16 @@
 
 #include "xenia/hid/input_system.h"
 
+#include <atomic>
+#include <chrono>
+#include <filesystem>
+#include <fstream>
+#include <mutex>
+#include <sstream>
+#include <string>
+#include <thread>
+
+#include "xenia/base/cvar.h"
 #include "xenia/base/profiling.h"
 #include "xenia/hid/hid_flags.h"
 #include "xenia/hid/input_driver.h"
@@ -31,6 +41,173 @@ DEFINE_double(left_stick_deadzone_percentage, 0.0,
 DEFINE_double(
     right_stick_deadzone_percentage, 0.0,
     "Defines deadzone level for right stick. Allowed range [0.0-1.0].", "HID");
+
+DEFINE_path(
+    input_script_file, "",
+    "Debug aid: poll this file for controller commands and apply them to "
+    "the first connected controller of user 0 (the keyboard driver counts). "
+    "The file is consumed (deleted) once read. Commands are separated by "
+    "whitespace and run in order: 'button[+button...][:milliseconds]' holds "
+    "the buttons (a b x y start back guide lb rb lt rt ls rs up down left "
+    "right lsup lsdown lsleft lsright rsup rsdown rsleft rsright) and "
+    "'wait:milliseconds' pauses.",
+    "HID");
+
+namespace {
+
+// Lets automated runs drive a title without a controller or window focus.
+class ScriptedInput {
+ public:
+  static ScriptedInput& Get() {
+    static ScriptedInput instance;
+    return instance;
+  }
+
+  // ORs the currently scripted state into the gamepad state.
+  void Apply(X_INPUT_STATE* state) {
+    std::call_once(thread_started_, [this]() {
+      std::thread([this]() { Run(); }).detach();
+    });
+    std::lock_guard<std::mutex> lock(mutex_);
+    state->packet_number += packet_number_;
+    state->gamepad.buttons = state->gamepad.buttons | current_.buttons;
+    if (current_.left_trigger) {
+      state->gamepad.left_trigger = current_.left_trigger;
+    }
+    if (current_.right_trigger) {
+      state->gamepad.right_trigger = current_.right_trigger;
+    }
+    if (current_.thumb_lx) state->gamepad.thumb_lx = current_.thumb_lx;
+    if (current_.thumb_ly) state->gamepad.thumb_ly = current_.thumb_ly;
+    if (current_.thumb_rx) state->gamepad.thumb_rx = current_.thumb_rx;
+    if (current_.thumb_ry) state->gamepad.thumb_ry = current_.thumb_ry;
+  }
+
+ private:
+  struct State {
+    uint16_t buttons = 0;
+    uint8_t left_trigger = 0;
+    uint8_t right_trigger = 0;
+    int16_t thumb_lx = 0;
+    int16_t thumb_ly = 0;
+    int16_t thumb_rx = 0;
+    int16_t thumb_ry = 0;
+  };
+
+  static bool ParseButton(const std::string& name, State& state) {
+    static const struct {
+      const char* name;
+      uint16_t button;
+    } kButtons[] = {
+        {"a", X_INPUT_GAMEPAD_A},
+        {"b", X_INPUT_GAMEPAD_B},
+        {"x", X_INPUT_GAMEPAD_X},
+        {"y", X_INPUT_GAMEPAD_Y},
+        {"start", X_INPUT_GAMEPAD_START},
+        {"back", X_INPUT_GAMEPAD_BACK},
+        {"guide", X_INPUT_GAMEPAD_GUIDE},
+        {"lb", X_INPUT_GAMEPAD_LEFT_SHOULDER},
+        {"rb", X_INPUT_GAMEPAD_RIGHT_SHOULDER},
+        {"ls", X_INPUT_GAMEPAD_LEFT_THUMB},
+        {"rs", X_INPUT_GAMEPAD_RIGHT_THUMB},
+        {"up", X_INPUT_GAMEPAD_DPAD_UP},
+        {"down", X_INPUT_GAMEPAD_DPAD_DOWN},
+        {"left", X_INPUT_GAMEPAD_DPAD_LEFT},
+        {"right", X_INPUT_GAMEPAD_DPAD_RIGHT},
+    };
+    for (const auto& entry : kButtons) {
+      if (name == entry.name) {
+        state.buttons |= entry.button;
+        return true;
+      }
+    }
+    if (name == "lt") {
+      state.left_trigger = 0xFF;
+    } else if (name == "rt") {
+      state.right_trigger = 0xFF;
+    } else if (name == "lsup") {
+      state.thumb_ly = INT16_MAX;
+    } else if (name == "lsdown") {
+      state.thumb_ly = INT16_MIN;
+    } else if (name == "lsleft") {
+      state.thumb_lx = INT16_MIN;
+    } else if (name == "lsright") {
+      state.thumb_lx = INT16_MAX;
+    } else if (name == "rsup") {
+      state.thumb_ry = INT16_MAX;
+    } else if (name == "rsdown") {
+      state.thumb_ry = INT16_MIN;
+    } else if (name == "rsleft") {
+      state.thumb_rx = INT16_MIN;
+    } else if (name == "rsright") {
+      state.thumb_rx = INT16_MAX;
+    } else {
+      return false;
+    }
+    return true;
+  }
+
+  void SetState(const State& state) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    current_ = state;
+    ++packet_number_;
+  }
+
+  void Run() {
+    const std::filesystem::path path = cvars::input_script_file;
+    while (true) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(30));
+      std::error_code error_code;
+      if (!std::filesystem::exists(path, error_code)) {
+        continue;
+      }
+      std::stringstream commands;
+      {
+        std::ifstream file(path);
+        commands << file.rdbuf();
+      }
+      std::filesystem::remove(path, error_code);
+
+      std::string command;
+      while (commands >> command) {
+        uint32_t duration_ms = 200;
+        size_t colon = command.find(':');
+        if (colon != std::string::npos) {
+          duration_ms = uint32_t(std::strtoul(command.c_str() + colon + 1,
+                                              nullptr, 10));
+          command.resize(colon);
+        }
+        State state;
+        bool valid = true;
+        if (command != "wait") {
+          std::stringstream names(command);
+          std::string name;
+          while (std::getline(names, name, '+')) {
+            valid &= ParseButton(name, state);
+          }
+        }
+        if (!valid) {
+          XELOGW("input_script_file: unknown command \"{}\"", command);
+          continue;
+        }
+        SetState(state);
+        std::this_thread::sleep_for(std::chrono::milliseconds(duration_ms));
+        if (command != "wait") {
+          // Release between commands so repeated presses register.
+          SetState(State());
+          std::this_thread::sleep_for(std::chrono::milliseconds(120));
+        }
+      }
+    }
+  }
+
+  std::once_flag thread_started_;
+  std::mutex mutex_;
+  State current_;
+  uint32_t packet_number_ = 0;
+};
+
+}  // namespace
 
 InputSystem::InputSystem(xe::ui::Window* window) : window_(window) {
 #ifdef XE_PLATFORM_WIN32
@@ -125,6 +302,9 @@ X_RESULT InputSystem::GetState(uint32_t user_index, uint32_t flags,
     X_RESULT result = driver->GetState(user_index, out_state);
     if (result == X_ERROR_SUCCESS) {
       UpdateUsedSlot(driver, user_index, true);
+      if (user_index == 0 && !cvars::input_script_file.empty()) {
+        ScriptedInput::Get().Apply(out_state);
+      }
       AdjustDeadzoneLevels(user_index, &out_state->gamepad);
 
       if (out_state->gamepad.buttons != 0) {
