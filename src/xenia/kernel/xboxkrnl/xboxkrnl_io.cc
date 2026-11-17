@@ -148,6 +148,17 @@ dword_result_t NtReadFile_entry(dword_t file_handle, dword_t event_handle,
           buffer.guest_address(), buffer_length,
           byte_offset_ptr ? static_cast<uint64_t>(*byte_offset_ptr) : -1,
           &bytes_read, apc_context);
+      if (XFAILED(result)) {
+        // Reads aren't logged normally (high frequency), but a failing one is
+        // usually the reason a title stops loading.
+        XELOGW(
+            "NtReadFile failed: {} length={:X} offset={:X} (file size {:X}) -> "
+            "{:08X}",
+            file->entry()->path(), uint32_t(buffer_length),
+            byte_offset_ptr ? static_cast<uint64_t>(*byte_offset_ptr)
+                            : file->position(),
+            uint64_t(file->entry()->size()), uint32_t(result));
+      }
       if (io_status_block) {
         io_status_block->status = result;
         io_status_block->information = bytes_read;

@@ -558,6 +558,11 @@ class SpirvShaderTranslator : public ShaderTranslator {
   void StartVertexOrTessEvalShaderBeforeMain();
   void StartVertexOrTessEvalShaderInMain();
   void CompleteVertexOrTessEvalShaderInMain();
+  // For HostVertexShaderType::kRectangleListAsTriangleStrip, creates the
+  // actual entry point that runs the translated guest shader (function_main_)
+  // for the three guest vertices of the rectangle and outputs the strip vertex
+  // corresponding to the host vertex index. Returns the entry point function.
+  spv::Function* CompleteRectangleListAsTriangleStripEntryPoint();
 
   void StartFragmentShaderBeforeMain();
   void StartFragmentShaderInMain();
@@ -910,6 +915,10 @@ class SpirvShaderTranslator : public ShaderTranslator {
 
   // VS as VS only - int.
   spv::Id input_vertex_index_;
+  // VS for HostVertexShaderType::kRectangleListAsTriangleStrip only - uint,
+  // module-scope (private) index of the guest vertex within the rectangle
+  // (0...2) that the current call of the translated guest shader is for.
+  spv::Id var_rectangle_guest_vertex_;
   // VS as TES only - int.
   spv::Id input_primitive_id_;
   // VS as TES only - float3 (barycentric coordinates).

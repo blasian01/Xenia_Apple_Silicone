@@ -340,6 +340,16 @@ dword_result_t XamLoaderSetLaunchData_entry(lpvoid_t data, dword_t size) {
   loader_data.launch_data_present = size ? true : false;
   loader_data.launch_data.resize(size);
   std::memcpy(loader_data.launch_data.data(), data, size);
+  {
+    // Titles often pass a human-readable reason (e.g. a fatal error message)
+    // when relaunching themselves; surface any text for diagnosis.
+    std::string text;
+    for (uint32_t n = 0; n < size; ++n) {
+      const char c = static_cast<char>(loader_data.launch_data[n]);
+      text.push_back(c >= 0x20 && c < 0x7F ? c : '.');
+    }
+    XELOGI("XamLoaderSetLaunchData({} bytes): {}", uint32_t(size), text);
+  }
   return 0;
 }
 DECLARE_XAM_EXPORT1(XamLoaderSetLaunchData, kNone, kSketchy);

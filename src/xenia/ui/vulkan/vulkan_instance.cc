@@ -9,6 +9,7 @@
 
 #include "xenia/ui/vulkan/vulkan_instance.h"
 
+#include <atomic>
 #include <sstream>
 #include <cstring>
 #include <string>
@@ -652,6 +653,20 @@ VkBool32 VulkanInstance::DebugUtilsMessengerCallback(
     VkDebugUtilsMessageTypeFlagsEXT message_types,
     const VkDebugUtilsMessengerCallbackDataEXT* callback_data,
     [[maybe_unused]] void* user_data) {
+#if XE_PLATFORM_MAC
+  // MoltenVK reports this for every draw that uses a strip topology without
+  // primitive restart (Metal always has restart enabled). It's harmless for
+  // the index values guests use in practice, but floods the log with
+  // thousands of lines per second, so only report it once.
+  if (callback_data->pMessage &&
+      std::strstr(callback_data->pMessage,
+                  "Metal does not support disabling primitive restart")) {
+    static std::atomic_flag primitive_restart_warned = ATOMIC_FLAG_INIT;
+    if (primitive_restart_warned.test_and_set()) {
+      return VK_FALSE;
+    }
+  }
+#endif  // XE_PLATFORM_MAC
   xe::LogLevel log_level;
   char log_prefix_char;
   if (message_severity >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) {

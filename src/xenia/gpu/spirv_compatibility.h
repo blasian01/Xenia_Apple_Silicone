@@ -362,6 +362,7 @@ namespace spv {
 #define StorageClassUniform StorageClass::Uniform
 #define StorageClassOutput StorageClass::Output
 #define StorageClassFunction StorageClass::Function
+#define StorageClassPrivate StorageClass::Private
 
 // Backward compatibility for SelectionControl
 #define SelectionControlMaskNone SelectionControlMask::MaskNone

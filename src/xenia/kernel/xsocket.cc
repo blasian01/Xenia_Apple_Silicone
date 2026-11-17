@@ -9,6 +9,7 @@
 
 #include "src/xenia/kernel/xsocket.h"
 
+#include <cerrno>
 #include <cstring>
 
 #include "xenia/base/logging.h"
@@ -24,6 +25,7 @@
 // clang-format on
 #else
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <netinet/ip.h>
 #include <netinet/tcp.h>
@@ -194,21 +196,35 @@ X_STATUS XSocket::IOControl(uint32_t cmd, uint8_t* arg_ptr) {
   }
   return X_STATUS_SUCCESS;
 #elif XE_PLATFORM_LINUX || XE_PLATFORM_MAC
-  int native_cmd = cmd;
-
-  assert_false(!supported_controls.contains(cmd));
-
-  if (supported_controls.contains(cmd)) {
-    native_cmd = supported_controls.at(cmd);
+  // The argument is a guest (big-endian) 32-bit value, and ioctl's request
+  // parameter is an unsigned long - passing the guest command through an int
+  // sign-extends it into an invalid request on 64-bit hosts.
+  const int fd = static_cast<int>(native_handle_);
+  switch (cmd) {
+    case 0x8004667E: {  // FIONBIO
+      const bool non_blocking = xe::load_and_swap<uint32_t>(arg_ptr) != 0;
+      int flags = fcntl(fd, F_GETFL, 0);
+      if (flags < 0) {
+        return X_STATUS_UNSUCCESSFUL;
+      }
+      flags = non_blocking ? (flags | O_NONBLOCK) : (flags & ~O_NONBLOCK);
+      if (fcntl(fd, F_SETFL, flags) < 0) {
+        return X_STATUS_UNSUCCESSFUL;
+      }
+      return X_STATUS_SUCCESS;
+    }
+    case 0x4004667F: {  // FIONREAD
+      int available = 0;
+      if (ioctl(fd, static_cast<unsigned long>(FIONREAD), &available) < 0) {
+        return X_STATUS_UNSUCCESSFUL;
+      }
+      xe::store_and_swap<uint32_t>(arg_ptr, static_cast<uint32_t>(available));
+      return X_STATUS_SUCCESS;
+    }
+    default:
+      XELOGE("XSocket::IOControl: unsupported command {:08X}", cmd);
+      return X_STATUS_UNSUCCESSFUL;
   }
-
-  int ret = ioctl(native_handle_, native_cmd, arg_ptr);
-
-  if (ret < 0) {
-    return X_STATUS_UNSUCCESSFUL;
-  }
-
-  return X_STATUS_SUCCESS;
 #endif
 }
 
@@ -389,8 +405,52 @@ uint32_t XSocket::GetLastWSAError() const {
   // Xbox error codes might not match with what we receive from OS
 #ifdef XE_PLATFORM_WIN32
   return WSAGetLastError();
+#else
+  // Titles compare against Winsock codes (WSAEWOULDBLOCK etc.), which are
+  // the BSD errno names offset by 10000 - but the numeric errno values differ
+  // per host OS, so translate by name.
+  switch (errno) {
+    case 0: return 0;
+    case EINTR: return 10004;
+    case EBADF: return 10009;
+    case EACCES: return 10013;
+    case EFAULT: return 10014;
+    case EINVAL: return 10022;
+    case EMFILE: return 10024;
+    case EWOULDBLOCK: return 10035;
+#if EAGAIN != EWOULDBLOCK
+    case EAGAIN: return 10035;
 #endif
-  return errno;
+    case EINPROGRESS: return 10036;
+    case EALREADY: return 10037;
+    case ENOTSOCK: return 10038;
+    case EDESTADDRREQ: return 10039;
+    case EMSGSIZE: return 10040;
+    case EPROTOTYPE: return 10041;
+    case ENOPROTOOPT: return 10042;
+    case EPROTONOSUPPORT: return 10043;
+    case ESOCKTNOSUPPORT: return 10044;
+    case EOPNOTSUPP: return 10045;
+    case EPFNOSUPPORT: return 10046;
+    case EAFNOSUPPORT: return 10047;
+    case EADDRINUSE: return 10048;
+    case EADDRNOTAVAIL: return 10049;
+    case ENETDOWN: return 10050;
+    case ENETUNREACH: return 10051;
+    case ENETRESET: return 10052;
+    case ECONNABORTED: return 10053;
+    case ECONNRESET: return 10054;
+    case ENOBUFS: return 10055;
+    case EISCONN: return 10056;
+    case ENOTCONN: return 10057;
+    case ESHUTDOWN: return 10058;
+    case ETIMEDOUT: return 10060;
+    case ECONNREFUSED: return 10061;
+    case EHOSTDOWN: return 10064;
+    case EHOSTUNREACH: return 10065;
+    default: return 10000 + errno;
+  }
+#endif
 }
 
 }  // namespace kernel

@@ -9,6 +9,9 @@
 
 #include "xenia/app/emulator_window.h"
 
+#include <chrono>
+#include <thread>
+
 #include "third_party/imgui/imgui.h"
 #include "third_party/stb/stb_image_write.h"
 #include "third_party/tomlplusplus/toml.hpp"
@@ -140,6 +143,11 @@ DEFINE_int32(recent_titles_entry_amount, 10,
              "Allows user to define how many titles is saved in list of "
              "recently played titles.",
              "General");
+DEFINE_uint32(auto_screenshot_interval, 0,
+              "Debug aid: save a screenshot of the guest output every N "
+              "seconds while a title is running (0 = disabled).",
+              "General");
+
 DEFINE_bool(disable_doubleclick_fullscreen, false,
             "Allows the user to disable the behavior where a fast double-click "
             "causes Xenia to enter fullscreen mode.",
@@ -247,6 +255,22 @@ void EmulatorWindow::ShutdownGraphicsSystemPresenterPainting() {
 }
 
 void EmulatorWindow::OnEmulatorInitialized() {
+  if (cvars::auto_screenshot_interval) {
+    // The window outlives the emulation session, so the detached thread can
+    // safely keep posting to the UI thread for the lifetime of the process.
+    std::thread([this]() {
+      while (true) {
+        std::this_thread::sleep_for(
+            std::chrono::seconds(cvars::auto_screenshot_interval));
+        app_context_.CallInUIThread([this]() {
+          if (emulator() && emulator()->title_id() &&
+              GetGraphicsSystemPresenter()) {
+            TakeScreenshot();
+          }
+        });
+      }
+    }).detach();
+  }
   if (!emulator_->kernel_state()
            ->xam_state()
            ->profile_manager()
